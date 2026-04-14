@@ -1,19 +1,22 @@
 /**
  * CLI 명령어 정의
- * init, run, schedule, history, calibrate
+ * init, run, schedule, history, calibrate, status
  */
 
 import { Command } from 'commander';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import Table from 'cli-table3';
+import fs from 'fs';
+import path from 'path';
+import { execSync } from 'child_process';
 import { loadConfig, saveConfig, configExists, getDefaultConfig, ensureDataDir, DATA_DIR } from './core/config';
 import { createDB, resultToRecord } from './core/db';
 import { notify } from './core/notify';
 import { getMinGuaranteedSpeed } from './core/sla';
 import { installScheduler, uninstallScheduler } from './core/scheduler';
 import { LGUplusProvider } from './providers/lguplus';
-import type { Config, NotifyPayload, SpeedTestRecord } from './types';
+import type { Config, NotifyPayload, SpeedTestRecord, SpeedTestResult } from './types';
 
 const program = new Command();
 
@@ -121,11 +124,19 @@ program
   .description('속도 측정 실행')
   .option('--dry-run', '감면 안내만 하고 실제 신청은 하지 않음', false)
   .option('--no-notify', '알림 발송하지 않음')
-  .action(async (options: { dryRun: boolean; notify: boolean }) => {
+  .option('--provider <provider>', '측정 프로바이더 (lguplus | ookla)', 'lguplus')
+  .action(async (options: { dryRun: boolean; notify: boolean; provider: string }) => {
+    const providerName = options.provider.toLowerCase();
+    if (providerName !== 'lguplus' && providerName !== 'ookla') {
+      console.log(chalk.red(`알 수 없는 프로바이더: ${options.provider}`));
+      console.log('사용 가능: lguplus (기본), ookla');
+      return;
+    }
+
     const config = loadConfig();
-    const provider = new LGUplusProvider(config);
 
     console.log(chalk.magenta.bold('\n  damn-my-slow-lg 속도 측정\n'));
+    console.log(`  프로바이더: ${providerName === 'lguplus' ? 'LG U+ (공식 SLA)' : 'Ookla Speedtest CLI (참고용)'}`);
     console.log(`  계약 속도: ${config.plan.speed_mbps} Mbps`);
     console.log(`  최저보장: ${getMinGuaranteedSpeed(config.plan.speed_mbps)} Mbps (50%)`);
     if (options.dryRun) {
@@ -133,12 +144,35 @@ program
     }
     console.log('');
 
-    const result = await provider.run(options.dryRun);
+    let result: SpeedTestResult;
+
+    if (providerName === 'ookla') {
+      try {
+        const { SpeedtestCliProvider } = await import('./providers/speedtest-cli');
+        const ooklaProvider = new SpeedtestCliProvider(config);
+        result = await ooklaProvider.run(options.dryRun);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('Cannot find module') || msg.includes('MODULE_NOT_FOUND')) {
+          console.log(chalk.red('Ookla Speedtest CLI 프로바이더를 찾을 수 없습니다.'));
+          console.log(chalk.yellow('src/providers/speedtest-cli.ts 구현이 필요합니다.'));
+          console.log('');
+          console.log('Ookla Speedtest CLI 설치:');
+          console.log('  brew install speedtest-cli  (macOS)');
+          console.log('  sudo apt install speedtest-cli  (Ubuntu/Debian)');
+          return;
+        }
+        throw err;
+      }
+    } else {
+      const provider = new LGUplusProvider(config);
+      result = await provider.run(options.dryRun);
+    }
 
     // DB 저장
     const db = createDB(config.db_path);
     try {
-      db.insert(resultToRecord(result));
+      db.insert(resultToRecord(result, providerName));
     } finally {
       db.close();
     }
@@ -146,10 +180,15 @@ program
     // 결과 출력
     printResult(result, config.plan.speed_mbps);
 
+    if (providerName === 'ookla') {
+      console.log(chalk.gray('  * Ookla 결과는 참고용입니다. 공식 SLA 판정은 lguplus 프로바이더를 사용하세요.'));
+      console.log('');
+    }
+
     // 알림 발송
     if (options.notify && (config.notification.discord_webhook || config.notification.telegram_bot_token)) {
       const payload: NotifyPayload = {
-        title: 'LG U+ 속도 측정 결과',
+        title: `${providerName === 'ookla' ? '[Ookla] ' : ''}LG U+ 속도 측정 결과`,
         result,
         plan_speed: config.plan.speed_mbps,
         min_guaranteed_speed: getMinGuaranteedSpeed(config.plan.speed_mbps),
@@ -186,15 +225,20 @@ program
   .description('측정 이력 조회')
   .option('-n, --limit <number>', '표시할 레코드 수', '10')
   .option('--today', '오늘 기록만 표시')
-  .action((options: { limit: string; today: boolean }) => {
+  .option('--provider <provider>', '특정 프로바이더 기록만 표시 (lguplus | ookla)')
+  .action((options: { limit: string; today: boolean; provider?: string }) => {
     const config = loadConfig();
     const db = createDB(config.db_path);
 
     let records: SpeedTestRecord[];
     try {
-      records = options.today
-        ? db.getTodayRecords()
-        : db.getRecent(parseInt(options.limit, 10));
+      if (options.today) {
+        records = db.getTodayRecords();
+      } else if (options.provider) {
+        records = db.getRecentByProvider(parseInt(options.limit, 10), options.provider.toLowerCase());
+      } else {
+        records = db.getRecent(parseInt(options.limit, 10));
+      }
     } finally {
       db.close();
     }
@@ -205,16 +249,18 @@ program
     }
 
     const table = new Table({
-      head: ['일시', '다운(Mbps)', '업(Mbps)', 'SLA', '감면'],
-      colAligns: ['left', 'right', 'right', 'center', 'center'],
+      head: ['일시', '프로바이더', '다운(Mbps)', '업(Mbps)', 'SLA', '감면'],
+      colAligns: ['left', 'left', 'right', 'right', 'center', 'center'],
     });
 
     for (const r of records) {
       const date = new Date(r.tested_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
       const slaColor = r.sla_result === 'pass' ? chalk.green : r.sla_result === 'fail' ? chalk.red : chalk.yellow;
+      const providerLabel = r.isp === 'ookla' ? chalk.cyan('ookla') : chalk.blue('lguplus');
 
       table.push([
         date,
+        providerLabel,
         r.download_mbps.toFixed(1),
         r.upload_mbps.toFixed(1),
         slaColor(r.sla_result),
@@ -225,18 +271,268 @@ program
     console.log(table.toString());
   });
 
-/** calibrate - DOM 선택자 확인 */
+/** calibrate - DOM 선택자 확인 (강화) */
 program
   .command('calibrate')
-  .description('LG U+ 속도측정 페이지 DOM 구조 확인 (headless=false)')
-  .action(async () => {
+  .description('LG U+ 속도측정 페이지 DOM 구조 자동 탐지 및 확인')
+  .option('--dump-dom', '현재 페이지 DOM 구조를 파일로 덤프')
+  .action(async (options: { dumpDom: boolean }) => {
     const config = loadConfig();
     const provider = new LGUplusProvider(config);
-    await provider.calibrate();
+
+    console.log(chalk.magenta.bold('\n  damn-my-slow-lg 캘리브레이션\n'));
+
+    // headless=false로 강제 설정
+    const origHeadless = config.headless;
+    config.headless = false;
+
+    const calibrateProvider = new LGUplusProvider(config);
+
+    try {
+      // init + login + navigate는 provider 내부에서 처리
+      // calibrate 메서드 호출 대신, 직접 DOM 분석 수행
+      await (calibrateProvider as any).init();
+      await (calibrateProvider as any).login();
+      await (calibrateProvider as any).navigateToSpeedTest();
+
+      const page = (calibrateProvider as any).page;
+      if (!page) {
+        console.log(chalk.red('브라우저 페이지를 가져올 수 없습니다.'));
+        return;
+      }
+
+      console.log(`  현재 URL: ${page.url()}`);
+      console.log('');
+
+      // DOM 요소 자동 탐지
+      console.log(chalk.bold('--- DOM 요소 탐지 ---'));
+      console.log('');
+
+      // 1. 모든 button 요소
+      const buttons = await page.$$eval('button', (els: Element[]) =>
+        els.map((el: Element) => ({
+          text: (el as HTMLElement).innerText?.trim().slice(0, 80) || '',
+          id: el.id || '',
+          className: el.className?.toString().slice(0, 100) || '',
+          type: el.getAttribute('type') || '',
+        })).filter((b: { text: string }) => b.text.length > 0)
+      );
+
+      console.log(chalk.cyan(`  [Button] ${buttons.length}개 발견`));
+      for (const btn of buttons.slice(0, 30)) {
+        const selector = btn.id ? `#${btn.id}` : btn.className ? `.${btn.className.split(' ')[0]}` : 'button';
+        console.log(`    "${btn.text}" -> ${selector}`);
+      }
+      console.log('');
+
+      // 2. 모든 input 요소
+      const inputs = await page.$$eval('input', (els: Element[]) =>
+        els.map((el: Element) => ({
+          name: el.getAttribute('name') || '',
+          type: el.getAttribute('type') || 'text',
+          placeholder: el.getAttribute('placeholder') || '',
+          id: el.id || '',
+        }))
+      );
+
+      console.log(chalk.cyan(`  [Input] ${inputs.length}개 발견`));
+      for (const inp of inputs.slice(0, 20)) {
+        console.log(`    name="${inp.name}" type="${inp.type}" placeholder="${inp.placeholder}" id="${inp.id}"`);
+      }
+      console.log('');
+
+      // 3. 테이블/리스트 구조
+      const tables = await page.$$eval('table', (els: Element[]) =>
+        els.map((el: Element) => ({
+          id: el.id || '',
+          className: el.className?.toString().slice(0, 100) || '',
+          rows: (el as HTMLTableElement).rows?.length || 0,
+        }))
+      );
+
+      console.log(chalk.cyan(`  [Table] ${tables.length}개 발견`));
+      for (const tbl of tables) {
+        console.log(`    id="${tbl.id}" class="${tbl.className}" rows=${tbl.rows}`);
+      }
+      console.log('');
+
+      // 4. 주요 링크 (a 태그)
+      const links = await page.$$eval('a[href]', (els: Element[]) =>
+        els.map((el: Element) => ({
+          text: (el as HTMLElement).innerText?.trim().slice(0, 60) || '',
+          href: el.getAttribute('href') || '',
+        })).filter((l: { text: string }) => l.text.length > 0)
+      );
+
+      console.log(chalk.cyan(`  [Link] ${links.length}개 발견`));
+      for (const link of links.slice(0, 20)) {
+        console.log(`    "${link.text}" -> ${link.href}`);
+      }
+      console.log('');
+
+      // calibrate 결과 저장
+      const calibrateResult = {
+        url: page.url(),
+        timestamp: new Date().toISOString(),
+        buttons,
+        inputs,
+        tables,
+        links: links.slice(0, 50),
+      };
+
+      ensureDataDir();
+      const outputPath = path.join(DATA_DIR, 'calibrate-lguplus.json');
+      fs.writeFileSync(outputPath, JSON.stringify(calibrateResult, null, 2), 'utf-8');
+      console.log(chalk.green(`탐지 결과 저장: ${outputPath}`));
+
+      // --dump-dom: 전체 HTML 덤프
+      if (options.dumpDom) {
+        const html = await page.content();
+        const dumpPath = path.join(DATA_DIR, `calibrate-dom-${new Date().toISOString().replace(/[:.]/g, '-')}.html`);
+        fs.writeFileSync(dumpPath, html, 'utf-8');
+        console.log(chalk.green(`DOM 덤프 저장: ${dumpPath}`));
+      }
+
+      // 브라우저 열어두기
+      console.log('');
+      console.log(chalk.yellow('브라우저에서 DevTools(F12)를 열어 추가 확인할 수 있습니다.'));
+      console.log(chalk.yellow('브라우저를 닫으면 캘리브레이션이 종료됩니다.'));
+      await page.waitForEvent('close', { timeout: 0 }).catch(() => {});
+    } finally {
+      config.headless = origHeadless;
+      await (calibrateProvider as any).cleanup();
+    }
+  });
+
+/** status - 현재 상태 요약 */
+program
+  .command('status')
+  .description('설정, DB, 스케줄러, 도구 설치 상태 확인')
+  .action(() => {
+    console.log(chalk.magenta.bold('\n  damn-my-slow-lg 상태\n'));
+
+    // 1. 설정 파일
+    const hasConfig = configExists();
+    console.log(chalk.bold('  [설정]'));
+    if (hasConfig) {
+      console.log(chalk.green(`    설정 파일: ${DATA_DIR}/config-lguplus.yaml`));
+      const config = loadConfig();
+      console.log(`    계약 속도: ${config.plan.speed_mbps} Mbps`);
+      console.log(`    최저보장: ${getMinGuaranteedSpeed(config.plan.speed_mbps)} Mbps`);
+      console.log(`    알림 - Discord: ${config.notification.discord_webhook ? 'ON' : 'OFF'}`);
+      console.log(`    알림 - Telegram: ${config.notification.telegram_bot_token ? 'ON' : 'OFF'}`);
+    } else {
+      console.log(chalk.yellow('    설정 파일 없음. `damn-my-slow-lg init` 실행 필요'));
+    }
+    console.log('');
+
+    // 2. DB 상태
+    console.log(chalk.bold('  [DB]'));
+    if (hasConfig) {
+      const config = loadConfig();
+      const db = createDB(config.db_path);
+      try {
+        const totalCount = db.count();
+        console.log(`    총 레코드: ${totalCount}건`);
+
+        if (totalCount > 0) {
+          const recent = db.getRecent(1);
+          if (recent.length > 0) {
+            const last = recent[0];
+            const date = new Date(last.tested_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
+            const slaColor = last.sla_result === 'pass' ? chalk.green : last.sla_result === 'fail' ? chalk.red : chalk.yellow;
+            console.log(`    최근 측정: ${date}`);
+            console.log(`    결과: ${last.download_mbps.toFixed(1)} Mbps (DL) / ${last.upload_mbps.toFixed(1)} Mbps (UL) / SLA: ${slaColor(last.sla_result)}`);
+            console.log(`    프로바이더: ${last.isp}`);
+          }
+
+          const todayRecords = db.getTodayRecords();
+          console.log(`    오늘 측정: ${todayRecords.length}건`);
+        }
+      } finally {
+        db.close();
+      }
+    } else {
+      console.log(chalk.yellow('    설정 필요'));
+    }
+    console.log('');
+
+    // 3. 스케줄러 상태
+    console.log(chalk.bold('  [스케줄러]'));
+    const platform = process.platform;
+    if (platform === 'darwin') {
+      const plistPath = path.join(
+        process.env.HOME || '',
+        'Library', 'LaunchAgents', 'com.damn-my-slow-lg.scheduler.plist'
+      );
+      if (fs.existsSync(plistPath)) {
+        console.log(chalk.green('    launchd 등록됨'));
+        try {
+          const listOutput = execSync('launchctl list | grep damn-my-slow', { encoding: 'utf-8' });
+          if (listOutput.trim()) {
+            console.log(`    ${listOutput.trim()}`);
+          }
+        } catch {
+          console.log(chalk.yellow('    launchd에 로드되지 않은 상태'));
+        }
+      } else {
+        console.log(chalk.yellow('    등록 안됨. `damn-my-slow-lg schedule` 실행 필요'));
+      }
+    } else {
+      try {
+        const crontab = execSync('crontab -l 2>/dev/null', { encoding: 'utf-8' });
+        if (crontab.includes('damn-my-slow-lg')) {
+          console.log(chalk.green('    crontab 등록됨'));
+        } else {
+          console.log(chalk.yellow('    등록 안됨'));
+        }
+      } catch {
+        console.log(chalk.yellow('    등록 안됨'));
+      }
+    }
+    console.log('');
+
+    // 4. 외부 도구 설치 여부
+    console.log(chalk.bold('  [외부 도구]'));
+
+    // Playwright
+    try {
+      require.resolve('playwright');
+      console.log(chalk.green('    Playwright: 설치됨'));
+    } catch {
+      console.log(chalk.red('    Playwright: 미설치'));
+    }
+
+    // Ookla Speedtest CLI
+    try {
+      const speedtestVersion = execSync('speedtest --version 2>/dev/null', { encoding: 'utf-8' }).trim();
+      console.log(chalk.green(`    Ookla Speedtest CLI: ${speedtestVersion.split('\n')[0]}`));
+    } catch {
+      try {
+        execSync('speedtest-cli --version 2>/dev/null', { encoding: 'utf-8' });
+        console.log(chalk.green('    Ookla Speedtest CLI: 설치됨 (speedtest-cli)'));
+      } catch {
+        console.log(chalk.yellow('    Ookla Speedtest CLI: 미설치'));
+        console.log(chalk.gray('      brew install speedtest-cli  (macOS)'));
+      }
+    }
+
+    console.log('');
+
+    // 5. calibrate 결과
+    const calibratePath = path.join(DATA_DIR, 'calibrate-lguplus.json');
+    if (fs.existsSync(calibratePath)) {
+      const stat = fs.statSync(calibratePath);
+      const date = stat.mtime.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
+      console.log(chalk.bold('  [캘리브레이션]'));
+      console.log(chalk.green(`    마지막 실행: ${date}`));
+    }
+
+    console.log('');
   });
 
 /** 결과 출력 헬퍼 */
-function printResult(result: import('./types').SpeedTestResult, planSpeed: number): void {
+function printResult(result: SpeedTestResult, planSpeed: number): void {
   const minSpeed = getMinGuaranteedSpeed(planSpeed);
 
   console.log('');

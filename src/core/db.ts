@@ -11,7 +11,9 @@ interface DBDriver {
   insert(record: SpeedTestRecord): void;
   getAll(): SpeedTestRecord[];
   getRecent(limit: number): SpeedTestRecord[];
+  getRecentByProvider(limit: number, provider: string): SpeedTestRecord[];
   getTodayRecords(): SpeedTestRecord[];
+  count(): number;
   close(): void;
 }
 
@@ -54,9 +56,20 @@ class JsonDriver implements DBDriver {
     return this.records.slice(-limit).reverse();
   }
 
+  getRecentByProvider(limit: number, provider: string): SpeedTestRecord[] {
+    return this.records
+      .filter(r => r.isp === provider)
+      .slice(-limit)
+      .reverse();
+  }
+
   getTodayRecords(): SpeedTestRecord[] {
     const today = new Date().toISOString().slice(0, 10);
     return this.records.filter(r => r.tested_at.startsWith(today));
+  }
+
+  count(): number {
+    return this.records.length;
   }
 
   close(): void {
@@ -122,11 +135,22 @@ class SqliteDriver implements DBDriver {
     return this.db.prepare('SELECT * FROM speed_tests ORDER BY id DESC LIMIT ?').all(limit);
   }
 
+  getRecentByProvider(limit: number, provider: string): SpeedTestRecord[] {
+    return this.db.prepare(
+      'SELECT * FROM speed_tests WHERE isp = ? ORDER BY id DESC LIMIT ?'
+    ).all(provider, limit);
+  }
+
   getTodayRecords(): SpeedTestRecord[] {
     const today = new Date().toISOString().slice(0, 10);
     return this.db.prepare(
       "SELECT * FROM speed_tests WHERE tested_at LIKE ? || '%' ORDER BY id DESC"
     ).all(today);
+  }
+
+  count(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM speed_tests').get();
+    return row?.cnt ?? 0;
   }
 
   close(): void {
@@ -150,9 +174,9 @@ export function createDB(dbPath: string): DBDriver {
   return new JsonDriver(dbPath);
 }
 
-export function resultToRecord(result: SpeedTestResult): SpeedTestRecord {
+export function resultToRecord(result: SpeedTestResult, provider = 'lguplus'): SpeedTestRecord {
   return {
-    isp: 'lguplus',
+    isp: provider,
     tested_at: new Date().toISOString(),
     download_mbps: result.download_mbps,
     upload_mbps: result.upload_mbps,
