@@ -26,6 +26,7 @@ import path from 'path';
 import type { Config, SpeedTestResult, SpeedTestRound } from '../types';
 import { getMinGuaranteedSpeed, judgeRound, judgeSLA } from '../core/sla';
 import { DATA_DIR } from '../core/config';
+import { cleanupSnapshots } from '../core/snapshot';
 
 /** LGU+ 웹사이트 URL */
 const URLS = {
@@ -483,7 +484,14 @@ export class LGUplusProvider {
 
       const parsed = await measurePage.evaluate(() => {
         const body = document.body.innerText || '';
-        const results: Array<{ download: number; upload: number }> = [];
+        const results: Array<{ download: number; upload: number; ping: number }> = [];
+
+        // 지연시간(RTT) 파싱 -- "지연시간 평균 (RTT) - XX ms" 또는 "XX ms" 패턴
+        let latencyMs = 0;
+        const latencyMatch = body.match(/(\d+\.?\d*)\s*ms/i);
+        if (latencyMatch) {
+          latencyMs = parseFloat(latencyMatch[1]);
+        }
 
         // Mbps 값 추출 (다운로드/업로드 쌍)
         const speedMatches = body.match(/(\d+\.?\d*)\s*[Mm]bps/gi);
@@ -494,7 +502,7 @@ export class LGUplusProvider {
               ? parseFloat(speedMatches[i + 1].replace(/[^0-9.]/g, ''))
               : 0;
             if (dl > 0) {
-              results.push({ download: dl, upload: ul });
+              results.push({ download: dl, upload: ul, ping: latencyMs });
             }
           }
         }
@@ -508,8 +516,8 @@ export class LGUplusProvider {
         }
         isComplete = isComplete || body.includes('측정 완료') || body.includes('측정이 완료');
 
-        return { results, isComplete };
-      }).catch(() => ({ results: [] as Array<{ download: number; upload: number }>, isComplete: false }));
+        return { results, isComplete, latencyMs };
+      }).catch(() => ({ results: [] as Array<{ download: number; upload: number; ping: number }>, isComplete: false, latencyMs: 0 }));
 
       const roundCount = parsed.results.length;
 
@@ -529,6 +537,7 @@ export class LGUplusProvider {
           round: idx + 1,
           download_mbps: r.download,
           upload_mbps: r.upload,
+          ping_ms: r.ping,
           passed: judgeRound(r.download, minSpeed),
         }));
       }
@@ -638,6 +647,7 @@ export class LGUplusProvider {
       round: idx + 1,
       download_mbps: row.download_mbps,
       upload_mbps: row.upload_mbps,
+      ping_ms: row.latency_ms,
       passed: judgeRound(row.download_mbps, minSpeed),
     }));
   }
@@ -732,6 +742,8 @@ export class LGUplusProvider {
    * @param sla true=SLA 5회 측정, false=일반 1회 측정 (기본: true)
    */
   async run(dryRun = false, sla = true): Promise<SpeedTestResult> {
+    cleanupSnapshots(7); // 7일 이상 된 스냅샷 자동 정리
+
     try {
       await this.init();
       await this.login();
@@ -747,12 +759,16 @@ export class LGUplusProvider {
       const slaResult = judgeSLA(rounds);
       const totalDownload = rounds.reduce((sum, r) => sum + r.download_mbps, 0) / rounds.length;
       const totalUpload = rounds.reduce((sum, r) => sum + r.upload_mbps, 0) / rounds.length;
+      const pingsWithValue = rounds.filter((r) => r.ping_ms != null && r.ping_ms > 0);
+      const avgPing = pingsWithValue.length > 0
+        ? pingsWithValue.reduce((sum, r) => sum + (r.ping_ms ?? 0), 0) / pingsWithValue.length
+        : 0;
       const failCount = rounds.filter((r) => !r.passed).length;
 
       const result: SpeedTestResult = {
         download_mbps: totalDownload,
         upload_mbps: totalUpload,
-        ping_ms: 0,
+        ping_ms: avgPing,
         sla_result: slaResult,
         complaint_filed: false,
         complaint_result: 'not_applicable',

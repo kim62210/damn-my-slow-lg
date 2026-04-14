@@ -45,6 +45,8 @@ export interface SpeedTestRound {
   round: number;
   download_mbps: number;
   upload_mbps: number;
+  /** 지연시간 (ms) -- myspeed RTT 또는 이력 탭 지연값 */
+  ping_ms?: number;
   /** 최저보장속도 (계약속도의 50%) 충족 여부 */
   passed: boolean;
 }

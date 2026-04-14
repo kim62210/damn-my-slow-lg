@@ -7,12 +7,23 @@ import fs from 'fs';
 import path from 'path';
 import type { SpeedTestRecord, SpeedTestResult } from '../types';
 
-interface DBDriver {
+/**
+ * KST 기준 오늘 날짜 반환 (YYYY-MM-DD)
+ * UTC 기반 toISOString()은 KST 00:00-08:59 사이에 전날 날짜를 반환하므로,
+ * 명시적으로 Asia/Seoul 타임존을 사용한다.
+ */
+function getTodayKST(): string {
+  return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+}
+
+export interface DBDriver {
   insert(record: SpeedTestRecord): void;
   getAll(): SpeedTestRecord[];
   getRecent(limit: number): SpeedTestRecord[];
   getRecentByProvider(limit: number, provider: string): SpeedTestRecord[];
   getTodayRecords(): SpeedTestRecord[];
+  hasComplaintSuccessToday(): boolean;
+  hasSlaFailToday(): boolean;
   count(): number;
   close(): void;
 }
@@ -64,8 +75,18 @@ class JsonDriver implements DBDriver {
   }
 
   getTodayRecords(): SpeedTestRecord[] {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayKST();
     return this.records.filter(r => r.tested_at.startsWith(today));
+  }
+
+  hasComplaintSuccessToday(): boolean {
+    const today = getTodayKST();
+    return this.records.some(r => r.tested_at.startsWith(today) && r.complaint_result === 'success');
+  }
+
+  hasSlaFailToday(): boolean {
+    const today = getTodayKST();
+    return this.records.some(r => r.tested_at.startsWith(today) && r.sla_result === 'fail');
   }
 
   count(): number {
@@ -142,10 +163,26 @@ class SqliteDriver implements DBDriver {
   }
 
   getTodayRecords(): SpeedTestRecord[] {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayKST();
     return this.db.prepare(
       "SELECT * FROM speed_tests WHERE tested_at LIKE ? || '%' ORDER BY id DESC"
     ).all(today);
+  }
+
+  hasComplaintSuccessToday(): boolean {
+    const today = getTodayKST();
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as cnt FROM speed_tests WHERE tested_at LIKE ? || '%' AND complaint_result = 'success'"
+    ).get(today);
+    return (row?.cnt ?? 0) > 0;
+  }
+
+  hasSlaFailToday(): boolean {
+    const today = getTodayKST();
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as cnt FROM speed_tests WHERE tested_at LIKE ? || '%' AND sla_result = 'fail'"
+    ).get(today);
+    return (row?.cnt ?? 0) > 0;
   }
 
   count(): number {
@@ -175,9 +212,12 @@ export function createDB(dbPath: string): DBDriver {
 }
 
 export function resultToRecord(result: SpeedTestResult, provider = 'lguplus'): SpeedTestRecord {
+  // KST 기준 ISO 문자열 (getTodayRecords와 날짜 기준 일치)
+  const now = new Date();
+  const kstISO = new Date(now.getTime() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
   return {
     isp: provider,
-    tested_at: new Date().toISOString(),
+    tested_at: kstISO,
     download_mbps: result.download_mbps,
     upload_mbps: result.upload_mbps,
     ping_ms: result.ping_ms,
