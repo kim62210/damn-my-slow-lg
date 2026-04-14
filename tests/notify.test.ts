@@ -52,7 +52,7 @@ describe('sendDiscord', () => {
 
     const [url, body] = (axios.post as any).mock.calls[0];
     expect(url).toBe('https://discord.com/api/webhooks/test');
-    expect(body.embeds[0].title).toBe('damn-my-dumb-lg');
+    expect(body.embeds[0].title).toBe('damn-my-slow-lg');
     expect(body.embeds[0].color).toBe(0xff0000); // fail = red
   });
 

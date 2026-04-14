@@ -52,7 +52,7 @@ export function loadConfig(): Config {
   if (!fs.existsSync(configPath)) {
     throw new Error(
       `설정 파일이 없습니다: ${configPath}\n` +
-      '`damn-my-dumb-lg init` 명령으로 초기 설정을 진행해주세요.'
+      '`damn-my-slow-lg init` 명령으로 초기 설정을 진행해주세요.'
     );
   }
 

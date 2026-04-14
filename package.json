@@ -1,5 +1,5 @@
 {
-  "name": "damn-my-dumb-lg",
+  "name": "damn-my-slow-lg",
   "version": "0.1.0",
   "description": "LG U+ 인터넷 SLA 속도 미달 시 요금 감면을 자동화하는 CLI 도구",
   "keywords": [
@@ -13,7 +13,7 @@
   ],
   "license": "MIT",
   "bin": {
-    "damn-my-dumb-lg": "bin/damn-my-dumb-lg"
+    "damn-my-slow-lg": "bin/damn-my-slow-lg"
   },
   "main": "dist/index.js",
   "files": [

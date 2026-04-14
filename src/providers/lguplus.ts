@@ -9,7 +9,7 @@
  * 5. 결과 파싱 및 SLA 판정
  * 6. 감면 대상 시 알림 (전화 101 안내)
  *
- * NOTE: DOM 선택자는 LGU+ 네트워크에서 `damn-my-dumb-lg calibrate` 실행하여 확인 필요.
+ * NOTE: DOM 선택자는 LGU+ 네트워크에서 `damn-my-slow-lg calibrate` 실행하여 확인 필요.
  *       LGU+ 웹사이트 업데이트 시 선택자가 변경될 수 있음.
  */
 
@@ -35,7 +35,7 @@ const URLS = {
 /**
  * DOM 선택자 (LGU+ 사이트 구조에 따라 업데이트 필요)
  *
- * `damn-my-dumb-lg calibrate` 명령으로 실제 페이지에서 확인 가능.
+ * `damn-my-slow-lg calibrate` 명령으로 실제 페이지에서 확인 가능.
  * LGU+ 사이트가 Nuxt.js SPA이므로 동적 렌더링 대기 필요.
  */
 const SELECTORS = {
@@ -219,7 +219,7 @@ export class LGUplusProvider {
     if (!slaButton) {
       throw new Error(
         '속도측정 버튼을 찾을 수 없습니다.\n' +
-        '`damn-my-dumb-lg calibrate` 명령으로 DOM 선택자를 확인해주세요.'
+        '`damn-my-slow-lg calibrate` 명령으로 DOM 선택자를 확인해주세요.'
       );
     }
 

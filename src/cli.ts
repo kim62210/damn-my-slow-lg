@@ -18,7 +18,7 @@ import type { Config, NotifyPayload, SpeedTestRecord } from './types';
 const program = new Command();
 
 program
-  .name('damn-my-dumb-lg')
+  .name('damn-my-slow-lg')
   .description('LG U+ 인터넷 SLA 속도 미달 시 요금 감면을 도와주는 CLI 도구')
   .version('0.1.0');
 
@@ -27,7 +27,7 @@ program
   .command('init')
   .description('초기 설정 (LG U+ 계정, 요금제, 알림 설정)')
   .action(async () => {
-    console.log(chalk.magenta.bold('\n  damn-my-dumb-lg 초기 설정\n'));
+    console.log(chalk.magenta.bold('\n  damn-my-slow-lg 초기 설정\n'));
 
     const existing = configExists();
     if (existing) {
@@ -110,9 +110,9 @@ program
     console.log(chalk.green(`\n설정 저장 완료: ${DATA_DIR}/config-lguplus.yaml`));
     console.log(chalk.yellow('\n다음 단계:'));
     console.log('  1. LG U+ 네트워크에서 실행해야 합니다.');
-    console.log('  2. damn-my-dumb-lg calibrate  -- DOM 선택자 확인');
-    console.log('  3. damn-my-dumb-lg run --dry-run  -- 테스트 실행');
-    console.log('  4. damn-my-dumb-lg schedule  -- 자동 스케줄 등록');
+    console.log('  2. damn-my-slow-lg calibrate  -- DOM 선택자 확인');
+    console.log('  3. damn-my-slow-lg run --dry-run  -- 테스트 실행');
+    console.log('  4. damn-my-slow-lg schedule  -- 자동 스케줄 등록');
   });
 
 /** run - 속도측정 실행 */
@@ -125,7 +125,7 @@ program
     const config = loadConfig();
     const provider = new LGUplusProvider(config);
 
-    console.log(chalk.magenta.bold('\n  damn-my-dumb-lg 속도 측정\n'));
+    console.log(chalk.magenta.bold('\n  damn-my-slow-lg 속도 측정\n'));
     console.log(`  계약 속도: ${config.plan.speed_mbps} Mbps`);
     console.log(`  최저보장: ${getMinGuaranteedSpeed(config.plan.speed_mbps)} Mbps (50%)`);
     if (options.dryRun) {

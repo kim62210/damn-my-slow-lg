@@ -52,7 +52,7 @@ export async function sendDiscord(webhook: string, payload: NotifyPayload): Prom
 
   await axios.post(webhook, {
     embeds: [{
-      title: 'damn-my-dumb-lg',
+      title: 'damn-my-slow-lg',
       description: formatMessage(payload),
       color,
       timestamp: new Date().toISOString(),

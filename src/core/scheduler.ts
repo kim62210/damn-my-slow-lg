@@ -10,7 +10,7 @@ import os from 'os';
 import { execSync } from 'child_process';
 import type { Schedule } from '../types';
 
-const LABEL = 'com.damn-my-dumb-lg.scheduler';
+const LABEL = 'com.damn-my-slow-lg.scheduler';
 const PLIST_PATH = path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`);
 
 function getExecutablePath(): string {
@@ -23,13 +23,13 @@ function getExecutablePath(): string {
   // 글로벌 설치 경로 탐색
   try {
     const globalBin = execSync('npm root -g', { encoding: 'utf-8' }).trim();
-    const candidate = path.join(globalBin, 'damn-my-dumb-lg', 'bin', 'damn-my-dumb-lg');
+    const candidate = path.join(globalBin, 'damn-my-slow-lg', 'bin', 'damn-my-slow-lg');
     if (fs.existsSync(candidate)) return candidate;
   } catch {
     // 글로벌 설치 아닌 경우 무시
   }
 
-  return current || 'damn-my-dumb-lg';
+  return current || 'damn-my-slow-lg';
 }
 
 function buildScheduleEntries(schedule: Schedule): Array<{ Hour: number; Minute: number }> {
@@ -115,8 +115,8 @@ export function installCrontab(schedule: Schedule): string {
     .map(e => `${e.Minute} ${e.Hour} * * * ${nodePath} ${execPath} run >> ${logPath} 2>&1`)
     .join('\n');
 
-  const marker = '# damn-my-dumb-lg';
-  const markerEnd = '# /damn-my-dumb-lg';
+  const marker = '# damn-my-slow-lg';
+  const markerEnd = '# /damn-my-slow-lg';
 
   let existing = '';
   try {
@@ -137,7 +137,7 @@ export function installCrontab(schedule: Schedule): string {
 
   const newCrontab = `${cleaned.trim()}\n\n${marker}\n${crontabLines}\n${markerEnd}\n`;
 
-  const tmpFile = path.join(os.tmpdir(), 'damn-my-dumb-lg-crontab');
+  const tmpFile = path.join(os.tmpdir(), 'damn-my-slow-lg-crontab');
   fs.writeFileSync(tmpFile, newCrontab, 'utf-8');
   execSync(`crontab ${tmpFile}`, { encoding: 'utf-8' });
   fs.unlinkSync(tmpFile);
@@ -173,8 +173,8 @@ export function uninstallScheduler(): void {
   // crontab 에서 제거
   try {
     const existing = execSync('crontab -l 2>/dev/null', { encoding: 'utf-8' });
-    const marker = '# damn-my-dumb-lg';
-    const markerEnd = '# /damn-my-dumb-lg';
+    const marker = '# damn-my-slow-lg';
+    const markerEnd = '# /damn-my-slow-lg';
     let inBlock = false;
     const cleaned = existing
       .split('\n')
@@ -185,7 +185,7 @@ export function uninstallScheduler(): void {
       })
       .join('\n');
 
-    const tmpFile = path.join(os.tmpdir(), 'damn-my-dumb-lg-crontab');
+    const tmpFile = path.join(os.tmpdir(), 'damn-my-slow-lg-crontab');
     fs.writeFileSync(tmpFile, cleaned, 'utf-8');
     execSync(`crontab ${tmpFile}`, { encoding: 'utf-8' });
     fs.unlinkSync(tmpFile);
