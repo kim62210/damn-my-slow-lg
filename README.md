@@ -15,6 +15,9 @@ LG U+ 인터넷 SLA 속도 미달 시 요금 감면을 도와주는 CLI 도구.
 3. 결과를 DB에 기록하고 Discord/Telegram으로 알림
 4. SLA 미달 시 **101(고객센터) 전화 안내** 발송
 
+LGU+ 네트워크 외부에서는 **Ookla Speedtest CLI**를 fallback 측정 수단으로 사용할 수 있습니다.
+단, Ookla 측정 결과는 참고용이며 공식 SLA 감면 증빙으로는 사용할 수 없습니다.
+
 > **Note:** KT와 달리 LG U+는 온라인 감면 신청이 불가하여, 전화(101) 신청이 필요합니다.
 
 ## 요구사항
@@ -152,6 +155,7 @@ src/
     sla.ts              # SLA 판정 로직
   providers/
     lguplus.ts          # LG U+ Playwright 자동화
+    speedtest-cli.ts    # Ookla Speedtest CLI 래퍼 (fallback)
 tests/
   sla.test.ts           # SLA 판정 테스트
   config.test.ts        # 설정 테스트
