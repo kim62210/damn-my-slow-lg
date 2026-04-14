@@ -53,8 +53,12 @@ const NAV_TIMEOUT = 15_000;
 const SPA_SETTLE = 3_000;
 /** 최대 재시도 횟수 */
 const MAX_RETRIES = 2;
-/** 측정 프로그램 연결 대기 (ms) */
-const PROGRAM_CONNECT_TIMEOUT = 30_000;
+/** 측정 프로그램 연결 대기 (ms) - 60초 */
+const PROGRAM_CONNECT_TIMEOUT = 60_000;
+/** 측정 프로그램 감지 폴링 간격 (ms) */
+const PROGRAM_POLL_INTERVAL = 3_000;
+/** myspeed 로컬 WebSocket 서버 주소 */
+const MYSPEED_WS_URL = 'ws://127.0.0.1:7788';
 
 /**
  * 다중 fallback 선택자에서 첫 번째로 보이는 요소를 찾는다.
@@ -429,45 +433,89 @@ export class LGUplusProvider {
   /**
    * myspeed.uplus.co.kr 새 탭에서 측정 프로그램 연결 감지 및 대기
    *
+   * 측정 프로그램은 로컬 WebSocket 서버(ws://127.0.0.1:7788)로 동작.
+   * 페이지가 WS에 연결되면 "측정시작" 버튼이 enabled됨.
+   * 3초 간격으로 버튼 disabled 속성을 폴링하여 감지.
+   *
    * @returns true=프로그램 연결 성공 (측정 진행 가능), false=미설치
    */
   private async waitForMeasureProgram(measurePage: Page): Promise<boolean> {
-    console.log('[LGU+] 측정 프로그램 연결 대기 중...');
+    console.log(`[LGU+] 측정 프로그램 연결 대기 중... (WebSocket: ${MYSPEED_WS_URL})`);
 
     const startTime = Date.now();
 
     while (Date.now() - startTime < PROGRAM_CONNECT_TIMEOUT) {
-      const bodyText = await measurePage.evaluate(() => document.body.innerText || '').catch(() => '');
+      const btnState = await measurePage.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const startBtn = buttons.find((b) => (b.innerText || '').includes('측정시작'));
+        if (!startBtn) return 'not_found';
+        return startBtn.disabled ? 'disabled' : 'enabled';
+      }).catch(() => 'error');
 
-      // "측정 프로그램 연결중입니다" 오버레이가 사라졌는지 확인
-      if (!bodyText.includes('측정 프로그램 연결중') && !bodyText.includes('프로그램 연결중')) {
-        // 프로그램 다운로드 버튼이 나타났으면 미설치
-        if (bodyText.includes('측정 프로그램 다운로드') || bodyText.includes('프로그램 다운로드')) {
-          console.log('[LGU+] 측정 프로그램 미설치 감지');
-          await this.saveSnapshotOnPage(measurePage, 'program-not-installed');
-          return false;
-        }
-
-        // 연결 완료
-        console.log('[LGU+] 측정 프로그램 연결 완료');
+      if (btnState === 'enabled') {
+        console.log('[LGU+] 측정 프로그램 연결 완료 (측정시작 버튼 활성화)');
         await this.saveSnapshotOnPage(measurePage, 'program-connected');
         return true;
       }
 
-      await measurePage.waitForTimeout(2_000);
+      if (btnState === 'not_found') {
+        // 버튼 자체가 없으면 페이지 로드 미완료 -- 계속 대기
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log(`[LGU+] 측정시작 버튼 미발견, 페이지 로드 대기 중... (${elapsed}초 경과)`);
+      } else {
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log(`[LGU+] 측정시작 버튼 비활성 상태, 프로그램 연결 대기 중... (${elapsed}초 경과)`);
+      }
+
+      await measurePage.waitForTimeout(PROGRAM_POLL_INTERVAL);
     }
 
-    // 30초 경과 -- 프로그램 미설치로 판정
-    console.log('[LGU+] 측정 프로그램 연결 타임아웃 (30초) -- 미설치로 판정');
+    // 60초 경과 -- 프로그램 미설치로 판정
+    console.log('[LGU+] 측정 프로그램 연결 타임아웃 (60초) -- 미설치로 판정');
     await this.saveSnapshotOnPage(measurePage, 'program-connect-timeout');
     return false;
   }
 
   /**
+   * myspeed 페이지에서 "측정시작" 버튼을 찾아 클릭
+   *
+   * CSS class는 빌드 해시값이라 텍스트 기반으로만 선택.
+   */
+  private async clickStartMeasure(measurePage: Page): Promise<void> {
+    console.log('[LGU+] myspeed "측정시작" 버튼 클릭');
+
+    const clicked = await measurePage.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const startBtn = buttons.find((b) => (b.innerText || '').includes('측정시작') && !b.disabled);
+      if (startBtn) {
+        startBtn.click();
+        return true;
+      }
+      return false;
+    });
+
+    if (!clicked) {
+      await this.saveSnapshotOnPage(measurePage, 'start-button-click-failed');
+      throw new Error(
+        'myspeed 페이지에서 활성화된 "측정시작" 버튼을 찾을 수 없습니다.'
+      );
+    }
+
+    await this.saveSnapshotOnPage(measurePage, 'start-button-clicked');
+  }
+
+  /**
    * 방식 A: myspeed.uplus.co.kr 페이지에서 실시간 결과 파싱
    *
-   * 측정 완료 대기: "측정시작" 버튼이 다시 나타나면 완료.
-   * body 텍스트에서 Mbps 값 추출.
+   * "측정시작" 버튼 클릭 후 결과 대기.
+   * body 텍스트 구조:
+   *   다운로드 속도 / 평균 / {N} Mbps
+   *   업로드 속도 / 평균 / {N} Mbps
+   *   지연시간 / 평균 (RTT) {N} ms
+   *
+   * 측정 완료 감지:
+   *   - "준비 중" 텍스트가 사라지고 실제 숫자가 채워짐
+   *   - 또는 "측정시작" 버튼이 다시 enabled 상태로 돌아옴
    */
   private async pollMyspeedResults(measurePage: Page, sla: boolean): Promise<SpeedTestRound[]> {
     const minSpeed = getMinGuaranteedSpeed(this.config.plan.speed_mbps);
@@ -475,6 +523,9 @@ export class LGUplusProvider {
     const expectedRounds = sla ? 5 : 1;
     const startTime = Date.now();
     let lastRoundCount = 0;
+
+    // "측정시작" 버튼 클릭하여 측정 시작
+    await this.clickStartMeasure(measurePage);
 
     console.log(`[LGU+] myspeed 페이지에서 측정 결과 대기 중 (${sla ? 'SLA 5회' : '일반 1회'})...`);
 
@@ -484,62 +535,70 @@ export class LGUplusProvider {
 
       const parsed = await measurePage.evaluate(() => {
         const body = document.body.innerText || '';
-        const results: Array<{ download: number; upload: number; ping: number }> = [];
 
-        // 지연시간(RTT) 파싱 -- "지연시간 평균 (RTT) - XX ms" 또는 "XX ms" 패턴
+        // 다운로드 속도 파싱: "다운로드 속도" 섹션의 Mbps 값
+        let downloadMbps = 0;
+        const dlMatch = body.match(/다운로드\s*속도[\s\S]*?(\d+\.?\d*)\s*Mbps/i);
+        if (dlMatch) {
+          downloadMbps = parseFloat(dlMatch[1]);
+        }
+
+        // 업로드 속도 파싱: "업로드 속도" 섹션의 Mbps 값
+        let uploadMbps = 0;
+        const ulMatch = body.match(/업로드\s*속도[\s\S]*?(\d+\.?\d*)\s*Mbps/i);
+        if (ulMatch) {
+          uploadMbps = parseFloat(ulMatch[1]);
+        }
+
+        // 지연시간(RTT) 파싱: "평균 (RTT)" 옆의 ms 값
         let latencyMs = 0;
-        const latencyMatch = body.match(/(\d+\.?\d*)\s*ms/i);
-        if (latencyMatch) {
-          latencyMs = parseFloat(latencyMatch[1]);
+        const rttMatch = body.match(/평균\s*\(RTT\)\s*(\d+\.?\d*)\s*ms/i);
+        if (rttMatch) {
+          latencyMs = parseFloat(rttMatch[1]);
         }
 
-        // Mbps 값 추출 (다운로드/업로드 쌍)
-        const speedMatches = body.match(/(\d+\.?\d*)\s*[Mm]bps/gi);
-        if (speedMatches && speedMatches.length >= 2) {
-          for (let i = 0; i < speedMatches.length; i += 2) {
-            const dl = parseFloat(speedMatches[i].replace(/[^0-9.]/g, ''));
-            const ul = i + 1 < speedMatches.length
-              ? parseFloat(speedMatches[i + 1].replace(/[^0-9.]/g, ''))
-              : 0;
-            if (dl > 0) {
-              results.push({ download: dl, upload: ul, ping: latencyMs });
-            }
-          }
+        // 측정 완료 감지:
+        // 1. "준비 중" 텍스트가 사라졌는지
+        const hasReadyText = body.includes('준비 중');
+        // 2. "측정시작" 버튼이 다시 enabled로 돌아왔는지
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const startBtn = buttons.find((b) => (b.innerText || '').includes('측정시작'));
+        const btnReEnabled = startBtn ? !startBtn.disabled : false;
+
+        const hasResults = downloadMbps > 0;
+        const isComplete = hasResults && (!hasReadyText || btnReEnabled);
+
+        return { downloadMbps, uploadMbps, latencyMs, isComplete, hasResults };
+      }).catch(() => ({
+        downloadMbps: 0, uploadMbps: 0, latencyMs: 0,
+        isComplete: false, hasResults: false,
+      }));
+
+      if (parsed.hasResults && parsed.downloadMbps > 0) {
+        const roundCount = 1; // myspeed 페이지는 1회 측정 결과를 표시
+
+        if (roundCount > lastRoundCount) {
+          console.log(
+            `[LGU+] 측정 결과 감지: DL=${parsed.downloadMbps}Mbps UL=${parsed.uploadMbps}Mbps RTT=${parsed.latencyMs}ms (${elapsed}초 경과)`
+          );
+          lastRoundCount = roundCount;
+          await this.saveSnapshotOnPage(measurePage, `myspeed-round-${roundCount}`);
         }
 
-        // "측정시작" 버튼이 다시 나타나면 완료
-        const measureStartBtn = document.querySelector('button');
-        let isComplete = false;
-        if (measureStartBtn) {
-          const btnText = measureStartBtn.textContent || '';
-          isComplete = btnText.includes('측정시작') || btnText.includes('측정 시작');
+        if (parsed.isComplete) {
+          console.log('[LGU+] myspeed 측정 완료 감지');
+          await this.saveSnapshotOnPage(measurePage, 'myspeed-complete');
+
+          return [{
+            round: 1,
+            download_mbps: parsed.downloadMbps,
+            upload_mbps: parsed.uploadMbps,
+            ping_ms: parsed.latencyMs,
+            passed: judgeRound(parsed.downloadMbps, minSpeed),
+          }];
         }
-        isComplete = isComplete || body.includes('측정 완료') || body.includes('측정이 완료');
-
-        return { results, isComplete, latencyMs };
-      }).catch(() => ({ results: [] as Array<{ download: number; upload: number; ping: number }>, isComplete: false, latencyMs: 0 }));
-
-      const roundCount = parsed.results.length;
-
-      if (roundCount > lastRoundCount) {
-        console.log(`[LGU+] 라운드 ${roundCount}/${expectedRounds} 완료 (${elapsed}초 경과)`);
-        lastRoundCount = roundCount;
-        await this.saveSnapshotOnPage(measurePage, `myspeed-round-${roundCount}`);
       } else {
-        console.log(`[LGU+] 측정 진행 중... ${roundCount}/${expectedRounds} (${elapsed}초 경과)`);
-      }
-
-      if (roundCount >= expectedRounds || (parsed.isComplete && roundCount > 0)) {
-        console.log('[LGU+] myspeed 측정 완료 감지');
-        await this.saveSnapshotOnPage(measurePage, 'myspeed-complete');
-
-        return parsed.results.map((r, idx) => ({
-          round: idx + 1,
-          download_mbps: r.download,
-          upload_mbps: r.upload,
-          ping_ms: r.ping,
-          passed: judgeRound(r.download, minSpeed),
-        }));
+        console.log(`[LGU+] 측정 진행 중... (${elapsed}초 경과)`);
       }
     }
 
@@ -672,7 +731,7 @@ export class LGUplusProvider {
       const programConnected = await this.waitForMeasureProgram(measurePage);
 
       if (programConnected) {
-        // 방식 A: myspeed에서 실시간 파싱
+        // 방식 A: myspeed에서 측정시작 클릭 + 실시간 파싱
         const rounds = await this.pollMyspeedResults(measurePage, sla);
 
         if (rounds.length > 0) {
@@ -682,8 +741,12 @@ export class LGUplusProvider {
         // 실시간 파싱 실패 시 이력 탭 fallback
         console.log('[LGU+] myspeed 실시간 파싱 실패, 이력 탭 fallback 시도');
       } else {
-        // 프로그램 미설치 -- 이력 탭 fallback
-        console.log('[LGU+] 측정 프로그램 미설치, 이력 탭에서 최근 결과 수집 시도');
+        // 프로그램 미설치
+        console.log('[LGU+] 측정 프로그램이 실행되고 있지 않습니다.');
+        console.log('[LGU+] LGU+ 속도측정 프로그램을 설치하고 실행해주세요.');
+        console.log('[LGU+] (myspeed.uplus.co.kr 페이지의 "측정 프로그램 다운로드" 버튼에서 설치 가능)');
+        console.log(`[LGU+] WebSocket 포트: ${MYSPEED_WS_URL}`);
+        console.log('[LGU+] 이력 탭에서 최근 결과 수집 시도');
       }
 
       // 새 탭 닫기
@@ -696,9 +759,11 @@ export class LGUplusProvider {
     if (historyRounds.length === 0) {
       await this.saveSnapshot('no-results');
       throw new Error(
-        '측정 결과를 수집할 수 없습니다. ' +
-        '측정 프로그램이 설치되어 있지 않으면 이력 탭에서도 결과를 확인할 수 없습니다. ' +
-        '브라우저에서 직접 myspeed.uplus.co.kr에 접속하여 프로그램을 설치한 뒤 다시 시도하세요.'
+        '측정 결과를 수집할 수 없습니다.\n' +
+        '측정 프로그램이 실행되고 있지 않습니다.\n' +
+        'LGU+ 속도측정 프로그램을 설치하고 실행해주세요.\n' +
+        '(myspeed.uplus.co.kr 페이지의 "측정 프로그램 다운로드" 버튼에서 설치 가능)\n' +
+        `WebSocket 포트: ${MYSPEED_WS_URL}`
       );
     }
 
