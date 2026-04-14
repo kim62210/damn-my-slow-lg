@@ -16,7 +16,7 @@ import { notify } from './core/notify';
 import { getMinGuaranteedSpeed } from './core/sla';
 import { installScheduler, uninstallScheduler } from './core/scheduler';
 import { LGUplusProvider } from './providers/lguplus';
-import type { Config, NotifyPayload, SpeedTestRecord, SpeedTestResult } from './types';
+import type { Config, HistoryRecord, NotifyPayload, SpeedTestRecord, SpeedTestResult } from './types';
 
 const program = new Command();
 
@@ -125,7 +125,85 @@ program
   .option('--dry-run', '감면 안내만 하고 실제 신청은 하지 않음', false)
   .option('--no-notify', '알림 발송하지 않음')
   .option('--provider <provider>', '측정 프로바이더 (lguplus | ookla)', 'lguplus')
-  .action(async (options: { dryRun: boolean; notify: boolean; provider: string }) => {
+  .option('--sla', 'SLA 5회 측정 모드', false)
+  .option('--history', '측정 없이 이력 스크래핑 모드 (최근 측정 이력만 수집)', false)
+  .action(async (options: { dryRun: boolean; notify: boolean; provider: string; sla: boolean; history: boolean }) => {
+    const config = loadConfig();
+
+    // --history 모드: 측정 없이 이력만 스크래핑
+    if (options.history) {
+      console.log(chalk.magenta.bold('\n  damn-my-slow-lg 이력 스크래핑\n'));
+      console.log('  LG U+ 속도측정 이력 탭에서 최근 결과를 수집합니다.');
+      console.log('  (측정 프로그램 설치 불필요)\n');
+
+      const provider = new LGUplusProvider(config);
+      try {
+        await (provider as any).init();
+        await (provider as any).login();
+        await (provider as any).navigateToSpeedTest();
+
+        const page = (provider as any).page;
+        if (!page) {
+          console.log(chalk.red('브라우저 페이지를 가져올 수 없습니다.'));
+          return;
+        }
+
+        // 이력 탭 클릭
+        const historyTab = await page.$('text=이력') || await page.$('[data-tab="history"]') || await page.$('.tab-history');
+        if (historyTab) {
+          await historyTab.click();
+          await page.waitForTimeout(2000);
+        }
+
+        // 이력 테이블 파싱
+        const records: HistoryRecord[] = await page.$$eval('table tbody tr', (rows: Element[]) =>
+          rows.map((row: Element) => {
+            const cells = row.querySelectorAll('td');
+            if (cells.length < 5) return null;
+            return {
+              measured_at: cells[0]?.textContent?.trim() || '',
+              latency_ms: parseFloat(cells[1]?.textContent?.trim() || '0'),
+              loss_percent: parseFloat(cells[2]?.textContent?.trim() || '0'),
+              upload_mbps: parseFloat(cells[3]?.textContent?.trim() || '0'),
+              download_mbps: parseFloat(cells[4]?.textContent?.trim() || '0'),
+            };
+          }).filter(Boolean)
+        );
+
+        if (records.length === 0) {
+          console.log(chalk.yellow('이력이 없습니다.'));
+          return;
+        }
+
+        const table = new Table({
+          head: ['측정일시', '지연(ms)', '손실(%)', '업로드(Mbps)', '다운로드(Mbps)'],
+          colAligns: ['left', 'right', 'right', 'right', 'right'],
+        });
+
+        for (const r of records) {
+          table.push([
+            r.measured_at,
+            r.latency_ms.toFixed(2),
+            r.loss_percent.toFixed(1),
+            r.upload_mbps.toFixed(2),
+            r.download_mbps.toFixed(2),
+          ]);
+        }
+
+        console.log(table.toString());
+        console.log(chalk.gray(`\n  총 ${records.length}건의 이력을 수집했습니다.`));
+
+        // JSON으로도 저장
+        ensureDataDir();
+        const outputPath = path.join(DATA_DIR, `history-scraped-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+        fs.writeFileSync(outputPath, JSON.stringify(records, null, 2), 'utf-8');
+        console.log(chalk.green(`  이력 저장: ${outputPath}`));
+      } finally {
+        await (provider as any).cleanup();
+      }
+      return;
+    }
+
     const providerName = options.provider.toLowerCase();
     if (providerName !== 'lguplus' && providerName !== 'ookla') {
       console.log(chalk.red(`알 수 없는 프로바이더: ${options.provider}`));
@@ -133,12 +211,13 @@ program
       return;
     }
 
-    const config = loadConfig();
-
     console.log(chalk.magenta.bold('\n  damn-my-slow-lg 속도 측정\n'));
     console.log(`  프로바이더: ${providerName === 'lguplus' ? 'LG U+ (공식 SLA)' : 'Ookla Speedtest CLI (참고용)'}`);
     console.log(`  계약 속도: ${config.plan.speed_mbps} Mbps`);
     console.log(`  최저보장: ${getMinGuaranteedSpeed(config.plan.speed_mbps)} Mbps (50%)`);
+    if (options.sla) {
+      console.log(chalk.cyan('  [SLA] 5회 연속 측정 모드'));
+    }
     if (options.dryRun) {
       console.log(chalk.yellow('  [DRY RUN] 감면 안내만 합니다.'));
     }
