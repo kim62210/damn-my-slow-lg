@@ -32,7 +32,7 @@ function getExecutablePath(): string {
   return current || 'damn-my-slow-lg';
 }
 
-function buildScheduleEntries(schedule: Schedule): Array<{ Hour: number; Minute: number }> {
+export function buildScheduleEntries(schedule: Schedule): Array<{ Hour: number; Minute: number }> {
   const [startHour, startMinute] = schedule.time.split(':').map(Number);
   const entries: Array<{ Hour: number; Minute: number }> = [];
   const intervalMinutes = schedule.retry_interval_minutes;

@@ -78,6 +78,58 @@ describe('judgeSLA', () => {
     ];
     expect(judgeSLA(rounds)).toBe('fail');
   });
+
+  it('1회 측정 시 1회 미달이면 fail (ceil(1*0.6)=1)', () => {
+    const rounds: SpeedTestRound[] = [
+      { round: 1, download_mbps: 100, upload_mbps: 50, passed: false },
+    ];
+    expect(judgeSLA(rounds)).toBe('fail');
+  });
+
+  it('1회 측정 시 통과하면 pass', () => {
+    const rounds: SpeedTestRound[] = [
+      { round: 1, download_mbps: 500, upload_mbps: 200, passed: true },
+    ];
+    expect(judgeSLA(rounds)).toBe('pass');
+  });
+
+  it('10회 측정 시 6회 미달이면 fail (60% 기준)', () => {
+    const rounds: SpeedTestRound[] = Array.from({ length: 10 }, (_, i) => ({
+      round: i + 1,
+      download_mbps: i < 6 ? 100 : 500,
+      upload_mbps: 100,
+      passed: i >= 6,
+    }));
+    expect(judgeSLA(rounds)).toBe('fail');
+  });
+
+  it('10회 측정 시 5회 미달이면 pass (60% 미만)', () => {
+    const rounds: SpeedTestRound[] = Array.from({ length: 10 }, (_, i) => ({
+      round: i + 1,
+      download_mbps: i < 5 ? 100 : 500,
+      upload_mbps: 100,
+      passed: i >= 5,
+    }));
+    expect(judgeSLA(rounds)).toBe('pass');
+  });
+});
+
+describe('judgeRound 경계값', () => {
+  it('download_mbps가 정확히 최저보장속도이면 pass', () => {
+    expect(judgeRound(250, 250)).toBe(true);
+  });
+
+  it('download_mbps가 최저보장속도 - 0.001이면 fail', () => {
+    expect(judgeRound(249.999, 250)).toBe(false);
+  });
+
+  it('download_mbps가 최저보장속도 + 0.001이면 pass', () => {
+    expect(judgeRound(250.001, 250)).toBe(true);
+  });
+
+  it('download_mbps가 0이면 fail', () => {
+    expect(judgeRound(0, 250)).toBe(false);
+  });
 });
 
 describe('summarizeSLA', () => {
