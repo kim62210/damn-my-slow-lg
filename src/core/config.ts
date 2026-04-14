@@ -43,7 +43,9 @@ export function getDefaultConfig(): Config {
 
 export function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  } else {
+    fs.chmodSync(DATA_DIR, 0o700);
   }
 }
 
@@ -60,7 +62,7 @@ export function loadConfig(): Config {
   const parsed = yaml.load(raw) as Partial<Config>;
   const defaults = getDefaultConfig();
 
-  return {
+  const config: Config = {
     ...defaults,
     ...parsed,
     credentials: { ...defaults.credentials, ...parsed.credentials },
@@ -68,6 +70,25 @@ export function loadConfig(): Config {
     schedule: { ...defaults.schedule, ...parsed.schedule },
     notification: { ...defaults.notification, ...parsed.notification },
   };
+
+  // 환경변수 오버라이드 (config 파일보다 우선)
+  if (process.env.DMSL_LG_ID) {
+    config.credentials.id = process.env.DMSL_LG_ID;
+  }
+  if (process.env.DMSL_LG_PASSWORD) {
+    config.credentials.password = process.env.DMSL_LG_PASSWORD;
+  }
+  if (process.env.DMSL_DISCORD_WEBHOOK) {
+    config.notification.discord_webhook = process.env.DMSL_DISCORD_WEBHOOK;
+  }
+  if (process.env.DMSL_TELEGRAM_TOKEN) {
+    config.notification.telegram_bot_token = process.env.DMSL_TELEGRAM_TOKEN;
+  }
+  if (process.env.DMSL_TELEGRAM_CHAT) {
+    config.notification.telegram_chat_id = process.env.DMSL_TELEGRAM_CHAT;
+  }
+
+  return config;
 }
 
 export function saveConfig(config: Config): void {
@@ -78,7 +99,7 @@ export function saveConfig(config: Config): void {
     lineWidth: 120,
     noRefs: true,
   });
-  fs.writeFileSync(configPath, content, 'utf-8');
+  fs.writeFileSync(configPath, content, { encoding: 'utf-8', mode: 0o600 });
 }
 
 export function configExists(): boolean {

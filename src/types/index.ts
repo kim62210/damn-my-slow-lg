@@ -82,6 +82,15 @@ export interface SpeedTestRecord {
   raw_data: string;
 }
 
+/** LG U+ 속도측정 이력 (스크래핑) */
+export interface HistoryRecord {
+  measured_at: string;     // "2024-03-08 21:21:38"
+  latency_ms: number;      // 지연(ms)
+  loss_percent: number;    // 손실률(%)
+  upload_mbps: number;     // 업로드 평균속도
+  download_mbps: number;   // 다운로드 평균속도
+}
+
 /** 알림 메시지 포맷 */
 export interface NotifyPayload {
   title: string;
