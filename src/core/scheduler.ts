@@ -125,11 +125,13 @@ export function installCrontab(schedule: Schedule): string {
     existing = '';
   }
 
-  // 기존 항목 제거
+  // 기존 블록 전체 제거 (마커 ~ 종료마커 사이 모든 라인 포함)
+  let inBlock = false;
   const cleaned = existing
     .split('\n')
     .filter(line => {
-      const inBlock = line.includes(marker) || line.includes(markerEnd);
+      if (line.includes(marker) && !line.includes(markerEnd)) { inBlock = true; return false; }
+      if (line.includes(markerEnd)) { inBlock = false; return false; }
       return !inBlock;
     })
     .join('\n')

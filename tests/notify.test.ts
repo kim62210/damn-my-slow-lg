@@ -71,6 +71,30 @@ describe('sendTelegram', () => {
     expect(url).toContain('api.telegram.org/botbot123/sendMessage');
   });
 
+  it('HTML parse_mode로 전송하고 bold 태그를 사용한다', async () => {
+    await sendTelegram('bot123', 'chat456', mockPayload);
+
+    const [, body] = (axios.post as any).mock.calls[0];
+    expect(body.parse_mode).toBe('HTML');
+    expect(body.text).toContain('<b>');
+    expect(body.text).toContain('</b>');
+    // **마커가 남아있지 않아야 한다
+    expect(body.text).not.toContain('**');
+  });
+
+  it('HTML 특수문자가 이스케이프된다', async () => {
+    const payloadWithSpecialChars: NotifyPayload = {
+      ...mockPayload,
+      result: { ...mockResult, error: 'timeout < 5s & retry > 3' },
+    };
+    await sendTelegram('bot123', 'chat456', payloadWithSpecialChars);
+
+    const [, body] = (axios.post as any).mock.calls[0];
+    expect(body.text).toContain('&lt;');
+    expect(body.text).toContain('&gt;');
+    expect(body.text).toContain('&amp;');
+  });
+
   it('bot token이 비어있으면 요청하지 않는다', async () => {
     await sendTelegram('', 'chat456', mockPayload);
     expect(axios.post).not.toHaveBeenCalled();

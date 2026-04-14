@@ -60,6 +60,18 @@ export async function sendDiscord(webhook: string, payload: NotifyPayload): Prom
   }, { timeout: TIMEOUT_MS });
 }
 
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function formatTelegramHtml(payload: NotifyPayload): string {
+  const raw = formatMessage(payload);
+  // 먼저 HTML 특수문자 이스케이프 (bold 마커 제외 영역)
+  // **텍스트** -> <b>텍스트</b> 변환
+  const escaped = escapeHtml(raw.replace(/\*\*/g, '\x00'));
+  return escaped.replace(/\x00([^\x00]+)\x00/g, '<b>$1</b>');
+}
+
 export async function sendTelegram(
   botToken: string,
   chatId: string,
@@ -67,15 +79,14 @@ export async function sendTelegram(
 ): Promise<void> {
   if (!botToken || !chatId) return;
 
-  // Telegram은 bold에 * 사용 (Markdown)
-  const text = formatMessage(payload).replace(/\*\*/g, '*');
+  const text = formatTelegramHtml(payload);
 
   await axios.post(
     `https://api.telegram.org/bot${botToken}/sendMessage`,
     {
       chat_id: chatId,
       text,
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
     },
     { timeout: TIMEOUT_MS },
   );
