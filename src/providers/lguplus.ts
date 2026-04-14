@@ -116,16 +116,18 @@ export class LGUplusProvider {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  private manualLogin: boolean;
 
-  constructor(config: Config) {
+  constructor(config: Config, manualLogin = false) {
     this.config = config;
+    this.manualLogin = manualLogin;
   }
 
   /** 브라우저 초기화 */
   async init(): Promise<void> {
     try {
       this.browser = await chromium.launch({
-        headless: this.config.headless,
+        headless: this.manualLogin ? false : this.config.headless,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -164,6 +166,10 @@ export class LGUplusProvider {
    * Step 3: ID/PW 입력, submit
    */
   private async login(): Promise<void> {
+    if (this.manualLogin) {
+      return this.loginManual();
+    }
+
     const page = this.getPage();
     const { credentials } = this.config;
 
@@ -293,6 +299,54 @@ export class LGUplusProvider {
 
     await this.saveSnapshot('login-success');
     console.log('[LGU+] 로그인 완료');
+  }
+
+  /**
+   * 수동 로그인 모드
+   *
+   * 브라우저를 headless=false로 열고 로그인 페이지로 이동한 뒤,
+   * 사용자가 직접 로그인을 완료할 때까지 대기한다.
+   * 로그인 완료 감지: URL이 account.lguplus.com/login에서 벗어남.
+   * 최대 5분 대기.
+   */
+  private async loginManual(): Promise<void> {
+    const page = this.getPage();
+    const MANUAL_LOGIN_TIMEOUT = 5 * 60 * 1000;
+
+    console.log('[LGU+] 수동 로그인 모드');
+    console.log('[LGU+] 브라우저가 열립니다. 직접 로그인해주세요. (최대 5분)');
+
+    await page.goto(URLS.login, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
+    await page.waitForTimeout(SPA_SETTLE);
+
+    // account.lguplus.com 리다이렉트 대기
+    try {
+      await page.waitForURL('**/account.lguplus.com/**', { timeout: 15_000 });
+    } catch {
+      // 이미 리다이렉트되었거나 직접 접근된 경우
+    }
+
+    console.log('[LGU+] 로그인 페이지가 열렸습니다. 브라우저에서 직접 로그인하세요...');
+
+    // 로그인 완료 대기: URL이 로그인 페이지에서 벗어날 때까지 폴링
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < MANUAL_LOGIN_TIMEOUT) {
+      const currentUrl = page.url();
+
+      // 로그인 완료: 로그인 페이지에서 벗어남
+      if (!currentUrl.includes('account.lguplus.com/login') && !currentUrl.includes('/login')) {
+        await page.waitForTimeout(SPA_SETTLE);
+        await this.dismissPopups();
+        await this.saveSnapshot('manual-login-success');
+        console.log('[LGU+] 로그인 완료 감지!');
+        return;
+      }
+
+      await page.waitForTimeout(2_000);
+    }
+
+    throw new Error('수동 로그인 시간 초과 (5분). 다시 시도해주세요.');
   }
 
   /** 팝업/모달 닫기 (비밀번호 변경, USIM 안내, 광고 등) */

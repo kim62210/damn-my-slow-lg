@@ -149,9 +149,12 @@ program
   .option('--sla', 'SLA 5회 측정 모드', false)
   .option('--history', '측정 없이 이력 스크래핑 모드 (최근 측정 이력만 수집)', false)
   .option('--force', '당일 제한(stop_on_complaint_success) 무시', false)
-  .action(async (options: { dryRun: boolean; notify: boolean; provider: string; sla: boolean; history: boolean; force: boolean }) => {
-    if (!configExists(getConfigPath())) {
+  .option('--manual-login', '브라우저에서 직접 로그인 (설정 파일 없이도 사용 가능)', false)
+  .action(async (options: { dryRun: boolean; notify: boolean; provider: string; sla: boolean; history: boolean; force: boolean; manualLogin: boolean }) => {
+    // --manual-login: 설정 파일 없이도 실행 가능 (기본 설정 사용)
+    if (!options.manualLogin && !configExists(getConfigPath())) {
       console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
+      console.error('또는 --manual-login 옵션으로 브라우저에서 직접 로그인할 수 있습니다.');
       process.exit(1);
     }
 
@@ -161,16 +164,37 @@ program
     }
 
     try {
-    const config = loadConfig(getConfigPath());
+    const config = configExists(getConfigPath())
+      ? loadConfig(getConfigPath())
+      : getDefaultConfig();
 
-    // 필수 필드 검증
-    const validationErrors = validateConfig(config);
-    if (validationErrors.length > 0) {
-      console.error(chalk.red('설정 검증 실패:'));
-      for (const err of validationErrors) {
-        console.error(chalk.red(`  - ${err}`));
+    // --manual-login 시 요금제 속도만 필수 검증
+    if (options.manualLogin) {
+      if (!config.plan.speed_mbps || config.plan.speed_mbps <= 0) {
+        // 대화형으로 요금제 질문
+        const { speed_mbps } = await inquirer.prompt([{
+          type: 'list',
+          name: 'speed_mbps',
+          message: '인터넷 요금제 속도를 선택하세요:',
+          choices: [
+            { name: '100 Mbps', value: 100 },
+            { name: '500 Mbps', value: 500 },
+            { name: '1 Gbps (1000 Mbps)', value: 1000 },
+            { name: '10 Gbps (10000 Mbps)', value: 10000 },
+          ],
+        }]);
+        config.plan.speed_mbps = speed_mbps;
       }
-      process.exit(1);
+    } else {
+      // 필수 필드 검증
+      const validationErrors = validateConfig(config);
+      if (validationErrors.length > 0) {
+        console.error(chalk.red('설정 검증 실패:'));
+        for (const err of validationErrors) {
+          console.error(chalk.red(`  - ${err}`));
+        }
+        process.exit(1);
+      }
     }
 
     // stop_on_complaint_success: 오늘 이미 감면 성공 또는 SLA fail 기록이 있으면 스킵
@@ -196,7 +220,7 @@ program
       console.log('  LG U+ 속도측정 이력 탭에서 최근 결과를 수집합니다.');
       console.log('  (측정 프로그램 설치 불필요)\n');
 
-      const provider = new LGUplusProvider(config);
+      const provider = new LGUplusProvider(config, options.manualLogin);
       try {
         await (provider as any).init();
         await (provider as any).login();
@@ -304,7 +328,7 @@ program
         throw err;
       }
     } else {
-      const provider = new LGUplusProvider(config);
+      const provider = new LGUplusProvider(config, options.manualLogin);
       activeProvider = provider;
       result = await provider.run(options.dryRun, options.sla);
       activeProvider = null;
