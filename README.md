@@ -50,19 +50,28 @@ LG U+ 계정, 요금제, 알림 설정을 대화형으로 입력합니다.
 LG U+ 웹사이트 구조가 변경될 수 있으므로, 첫 실행 전에 확인합니다:
 
 ```bash
+# 브라우저 열기 + DOM 요소 자동 탐지
 damn-my-slow-lg calibrate
+
+# DOM 구조를 HTML 파일로 덤프
+damn-my-slow-lg calibrate --dump-dom
 ```
 
-headless=false 모드로 브라우저가 열리며, DevTools(F12)로 DOM 선택자를 확인할 수 있습니다.
+로그인 후 속도측정 페이지로 이동하여 button, input, table, link 요소를 자동 탐지합니다.
+결과는 `~/.damn-my-slow-isp/calibrate-lguplus.json`에 저장됩니다.
+headless=false 모드로 브라우저가 열리며, DevTools(F12)로 추가 확인할 수 있습니다.
 
-### 3. 테스트 실행
+### 3. 속도 측정
 
 ```bash
+# LG U+ 공식 SLA 측정 (기본)
+damn-my-slow-lg run
+
 # dry-run (감면 안내 없이 측정만)
 damn-my-slow-lg run --dry-run
 
-# 실제 실행
-damn-my-slow-lg run
+# Ookla Speedtest CLI로 측정 (참고용)
+damn-my-slow-lg run --provider ookla
 ```
 
 ### 4. 자동 스케줄 등록
@@ -86,7 +95,18 @@ damn-my-slow-lg history --today
 
 # 최근 20건
 damn-my-slow-lg history -n 20
+
+# 특정 프로바이더만 필터
+damn-my-slow-lg history --provider ookla
 ```
+
+### 6. 상태 확인
+
+```bash
+damn-my-slow-lg status
+```
+
+설정 파일 존재 여부, DB 레코드 수, 최근 측정 결과, 스케줄러 등록 상태, Ookla Speedtest CLI 설치 여부를 한눈에 보여줍니다.
 
 ## 알림 설정
 
