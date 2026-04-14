@@ -51,6 +51,22 @@ export interface SpeedTestRound {
   passed: boolean;
 }
 
+/** SLA 페이지에서 파싱한 요약 정보 */
+export interface SlaSummary {
+  /** 제공 속도 (Mbps) */
+  provided_speed_mbps: number;
+  /** 최저 보장 속도 (Mbps) */
+  min_guaranteed_mbps: number;
+  /** 다운로드 속도 평균 (Mbps) */
+  avg_download_mbps: number;
+  /** 측정 횟수 */
+  measure_count: number;
+  /** 기준미달 횟수 */
+  fail_count: number;
+  /** 최저속도미달 (%) */
+  fail_percent: number;
+}
+
 export interface SpeedTestResult {
   download_mbps: number;
   upload_mbps: number;
@@ -68,6 +84,10 @@ export interface SpeedTestResult {
     rounds: SpeedTestRound[];
   };
   error: string;
+  /** SLA 페이지 요약 (SLA 모드일 때만 존재) */
+  sla_summary?: SlaSummary;
+  /** myspeed.uplus.co.kr에 SLA 감면 API 존재 여부 (향후 확장용) */
+  sla_claim_api_available?: boolean;
 }
 
 /** DB에 저장되는 측정 기록 */

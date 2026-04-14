@@ -10,8 +10,12 @@
  * 2. 속도측정 페이지 이동 (Nuxt.js SPA)
  * 3. 측정대상(회선) 라디오 선택
  * 4. SLA(5회) 또는 일반(1회) 측정 버튼 클릭 -> myspeed.uplus.co.kr 새 탭
+ *    - SLA: myspeed.uplus.co.kr/sla/?user-id=XXX (5회 측정)
+ *    - 일반: myspeed.uplus.co.kr/speed/?user-id=XXX (1회 측정)
  * 5. 새 탭에서 측정 프로그램 연결 대기 -> 측정 실행
  * 6. 결과 수집: myspeed 실시간 파싱 또는 이력 탭 fallback
+ *    - SLA 페이지는 div 기반 레이아웃 (table 태그 없음) -> body.innerText 정규식 파싱
+ *    - SLA 감면 API: /api/v1/update_sla_claim (myspeed 도메인, 향후 확장용)
  *
  * 주요 특징:
  * - CSS 해시 클래스 사용 금지 (Nuxt.js SPA, 빌드마다 변경됨)
@@ -23,7 +27,7 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import fs from 'fs';
 import path from 'path';
-import type { Config, SpeedTestResult, SpeedTestRound } from '../types';
+import type { Config, SlaSummary, SpeedTestResult, SpeedTestRound } from '../types';
 import { getMinGuaranteedSpeed, judgeRound, judgeSLA } from '../core/sla';
 import { DATA_DIR } from '../core/config';
 import { cleanupSnapshots } from '../core/snapshot';
@@ -37,12 +41,16 @@ const URLS = {
   oauthEmail: 'https://account.lguplus.com/login/email',
   /** 속도측정 페이지 */
   speedTest: 'https://www.lguplus.com/support/self-troubleshoot/internet-speed-test',
+  /** myspeed 일반 측정 (1회) */
+  myspeedNormal: 'https://myspeed.uplus.co.kr/speed/',
+  /** myspeed SLA 측정 (5회) */
+  myspeedSla: 'https://myspeed.uplus.co.kr/sla/',
 };
 
 /** 폴링 간격 (ms) */
 const POLL_INTERVAL = 15_000;
-/** SLA 측정 타임아웃 (ms) - 40분 */
-const SLA_MEASURE_TIMEOUT = 40 * 60 * 1000;
+/** SLA 측정 타임아웃 (ms) - 25분 (20분 측정 + 5분 여유) */
+const SLA_MEASURE_TIMEOUT = 25 * 60 * 1000;
 /** 일반 측정 타임아웃 (ms) - 5분 */
 const NORMAL_MEASURE_TIMEOUT = 5 * 60 * 1000;
 /** 로그인 타임아웃 (ms) */
@@ -418,9 +426,17 @@ export class LGUplusProvider {
     const newPage = await newPagePromise;
 
     if (newPage) {
-      console.log(`[LGU+] 새 탭 열림: ${newPage.url()}`);
       await newPage.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
-      await this.saveSnapshot('new-tab-opened');
+      const newTabUrl = newPage.url();
+      console.log(`[LGU+] 새 탭 열림: ${newTabUrl}`);
+
+      // SLA/일반 URL 분기 검증
+      const expectedPath = sla ? '/sla/' : '/speed/';
+      if (newTabUrl.includes('myspeed.uplus.co.kr') && !newTabUrl.includes(expectedPath)) {
+        console.log(`[LGU+] 경고: 예상 경로(${expectedPath})와 다름 -- ${newTabUrl}`);
+      }
+
+      await this.saveSnapshotOnPage(newPage, 'new-tab-opened');
       return newPage;
     }
 
@@ -507,82 +523,67 @@ export class LGUplusProvider {
   /**
    * 방식 A: myspeed.uplus.co.kr 페이지에서 실시간 결과 파싱
    *
-   * "측정시작" 버튼 클릭 후 결과 대기.
-   * body 텍스트 구조:
-   *   다운로드 속도 / 평균 / {N} Mbps
-   *   업로드 속도 / 평균 / {N} Mbps
-   *   지연시간 / 평균 (RTT) {N} ms
+   * SLA (/sla/) 페이지:
+   *   - "SLA 측정결과" 섹션에서 요약 정보 파싱
+   *   - div 기반 라운드 테이블에서 1~5회차 결과 파싱 (table 태그 아님)
+   *   - 완료 감지: "측정 횟수: 5 회" 또는 5회차 데이터 존재
    *
-   * 측정 완료 감지:
-   *   - "준비 중" 텍스트가 사라지고 실제 숫자가 채워짐
-   *   - 또는 "측정시작" 버튼이 다시 enabled 상태로 돌아옴
+   * 일반 (/speed/) 페이지:
+   *   - 기존 방식: 다운로드/업로드/RTT 파싱
    */
   private async pollMyspeedResults(measurePage: Page, sla: boolean): Promise<SpeedTestRound[]> {
     const minSpeed = getMinGuaranteedSpeed(this.config.plan.speed_mbps);
     const timeout = sla ? SLA_MEASURE_TIMEOUT : NORMAL_MEASURE_TIMEOUT;
-    const expectedRounds = sla ? 5 : 1;
     const startTime = Date.now();
     let lastRoundCount = 0;
 
     // "측정시작" 버튼 클릭하여 측정 시작
     await this.clickStartMeasure(measurePage);
 
-    console.log(`[LGU+] myspeed 페이지에서 측정 결과 대기 중 (${sla ? 'SLA 5회' : '일반 1회'})...`);
+    const modeLabel = sla ? 'SLA 5회' : '일반 1회';
+    console.log(`[LGU+] myspeed 페이지에서 측정 결과 대기 중 (${modeLabel})...`);
 
     while (Date.now() - startTime < timeout) {
       await measurePage.waitForTimeout(POLL_INTERVAL);
       const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-      const parsed = await measurePage.evaluate(() => {
-        const body = document.body.innerText || '';
+      if (sla) {
+        // SLA 페이지 (/sla/) 전용 파싱
+        const parsed = await this.parseSlaPage(measurePage);
 
-        // 다운로드 속도 파싱: "다운로드 속도" 섹션의 Mbps 값
-        let downloadMbps = 0;
-        const dlMatch = body.match(/다운로드\s*속도[\s\S]*?(\d+\.?\d*)\s*Mbps/i);
-        if (dlMatch) {
-          downloadMbps = parseFloat(dlMatch[1]);
+        if (parsed.rounds.length > lastRoundCount) {
+          const latest = parsed.rounds[parsed.rounds.length - 1];
+          console.log(
+            `[LGU+] SLA ${latest.round}회차 결과: DL=${latest.download_mbps}Mbps UL=${latest.upload_mbps}Mbps ` +
+            `RTT=${latest.ping_ms ?? 0}ms ${latest.passed ? '충족' : '미달'} (${elapsed}초 경과)`
+          );
+          lastRoundCount = parsed.rounds.length;
+          await this.saveSnapshotOnPage(measurePage, `myspeed-sla-round-${lastRoundCount}`);
         }
 
-        // 업로드 속도 파싱: "업로드 속도" 섹션의 Mbps 값
-        let uploadMbps = 0;
-        const ulMatch = body.match(/업로드\s*속도[\s\S]*?(\d+\.?\d*)\s*Mbps/i);
-        if (ulMatch) {
-          uploadMbps = parseFloat(ulMatch[1]);
+        if (parsed.isComplete) {
+          console.log(`[LGU+] SLA 측정 완료 (${parsed.rounds.length}회차)`);
+          await this.saveSnapshotOnPage(measurePage, 'myspeed-sla-complete');
+
+          // slaSummary를 임시 저장 (run()에서 사용)
+          this._lastSlaSummary = parsed.summary ?? undefined;
+
+          return parsed.rounds;
         }
 
-        // 지연시간(RTT) 파싱: "평균 (RTT)" 옆의 ms 값
-        let latencyMs = 0;
-        const rttMatch = body.match(/평균\s*\(RTT\)\s*(\d+\.?\d*)\s*ms/i);
-        if (rttMatch) {
-          latencyMs = parseFloat(rttMatch[1]);
+        if (parsed.rounds.length === 0) {
+          console.log(`[LGU+] SLA 측정 진행 중... (${elapsed}초 경과)`);
         }
+      } else {
+        // 일반 페이지 (/speed/) 파싱
+        const parsed = await this.parseNormalPage(measurePage);
 
-        // 측정 완료 감지:
-        // 1. "준비 중" 텍스트가 사라졌는지
-        const hasReadyText = body.includes('준비 중');
-        // 2. "측정시작" 버튼이 다시 enabled로 돌아왔는지
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const startBtn = buttons.find((b) => (b.innerText || '').includes('측정시작'));
-        const btnReEnabled = startBtn ? !startBtn.disabled : false;
-
-        const hasResults = downloadMbps > 0;
-        const isComplete = hasResults && (!hasReadyText || btnReEnabled);
-
-        return { downloadMbps, uploadMbps, latencyMs, isComplete, hasResults };
-      }).catch(() => ({
-        downloadMbps: 0, uploadMbps: 0, latencyMs: 0,
-        isComplete: false, hasResults: false,
-      }));
-
-      if (parsed.hasResults && parsed.downloadMbps > 0) {
-        const roundCount = 1; // myspeed 페이지는 1회 측정 결과를 표시
-
-        if (roundCount > lastRoundCount) {
+        if (parsed.hasResults && parsed.downloadMbps > 0 && lastRoundCount === 0) {
           console.log(
             `[LGU+] 측정 결과 감지: DL=${parsed.downloadMbps}Mbps UL=${parsed.uploadMbps}Mbps RTT=${parsed.latencyMs}ms (${elapsed}초 경과)`
           );
-          lastRoundCount = roundCount;
-          await this.saveSnapshotOnPage(measurePage, `myspeed-round-${roundCount}`);
+          lastRoundCount = 1;
+          await this.saveSnapshotOnPage(measurePage, 'myspeed-round-1');
         }
 
         if (parsed.isComplete) {
@@ -597,13 +598,149 @@ export class LGUplusProvider {
             passed: judgeRound(parsed.downloadMbps, minSpeed),
           }];
         }
-      } else {
-        console.log(`[LGU+] 측정 진행 중... (${elapsed}초 경과)`);
+
+        if (!parsed.hasResults) {
+          console.log(`[LGU+] 측정 진행 중... (${elapsed}초 경과)`);
+        }
       }
     }
 
     console.log('[LGU+] myspeed 측정 타임아웃');
     return [];
+  }
+
+  /** SLA 페이지 임시 저장용 */
+  private _lastSlaSummary: SlaSummary | undefined;
+
+  /**
+   * SLA 페이지 body 텍스트에서 결과 파싱
+   *
+   * div 기반 레이아웃이므로 body.innerText를 정규식으로 파싱.
+   * - SLA 측정결과 요약: 제공 속도, 최저 보장 속도, 평균 DL, 측정 횟수, 기준미달, 최저속도미달%
+   * - 라운드 테이블: 1~5회 각각의 DL/UL/RTT/결과
+   */
+  private async parseSlaPage(measurePage: Page): Promise<{
+    rounds: SpeedTestRound[];
+    summary: SlaSummary | null;
+    isComplete: boolean;
+  }> {
+    const minSpeed = getMinGuaranteedSpeed(this.config.plan.speed_mbps);
+
+    return measurePage.evaluate((minSpeedArg: number) => {
+      const body = document.body.innerText || '';
+
+      // --- SLA 요약 섹션 파싱 ---
+      const providedMatch = body.match(/제공\s*속도\s*[:\s]*(\d+\.?\d*)\s*Mbps/);
+      const minGuaranteedMatch = body.match(/최저\s*보장\s*속도\s*[:\s]*(\d+\.?\d*)\s*Mbps/);
+      const avgDlMatch = body.match(/다운로드\s*속도\s*\(평균\)\s*[:\s]*(\d+\.?\d*)\s*Mbps/);
+      const measureCountMatch = body.match(/측정\s*횟수\s*[:\s]*(\d+)\s*회/);
+      const failCountMatch = body.match(/기준미달\s*횟수\s*[:\s]*(\d+)\s*회/);
+      const failPercentMatch = body.match(/최저속도미달\s*[:\s]*(\d+\.?\d*)\s*%/);
+
+      let summary = null;
+      const measureCount = measureCountMatch ? parseInt(measureCountMatch[1], 10) : 0;
+
+      if (measureCount > 0 && avgDlMatch) {
+        summary = {
+          provided_speed_mbps: providedMatch ? parseFloat(providedMatch[1]) : 0,
+          min_guaranteed_mbps: minGuaranteedMatch ? parseFloat(minGuaranteedMatch[1]) : 0,
+          avg_download_mbps: parseFloat(avgDlMatch[1]),
+          measure_count: measureCount,
+          fail_count: failCountMatch ? parseInt(failCountMatch[1], 10) : 0,
+          fail_percent: failPercentMatch ? parseFloat(failPercentMatch[1]) : 0,
+        };
+      }
+
+      // --- 라운드 테이블 파싱 (div 기반, table 태그 아님) ---
+      // 패턴: "N회 | YYYY-MM-DD HH:mm:ss | DL | UL | RTT | 충족/미달"
+      const rounds: Array<{
+        round: number;
+        download_mbps: number;
+        upload_mbps: number;
+        ping_ms: number;
+        passed: boolean;
+      }> = [];
+
+      const roundPattern = /(\d)회\s+([\d-]+\s+[\d:]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(충족|미달)/g;
+      let match;
+      while ((match = roundPattern.exec(body)) !== null) {
+        const dl = parseFloat(match[3]);
+        rounds.push({
+          round: parseInt(match[1], 10),
+          download_mbps: dl,
+          upload_mbps: parseFloat(match[4]),
+          ping_ms: parseFloat(match[5]),
+          passed: match[6] === '충족',
+        });
+      }
+
+      // 라운드가 정규식으로 안 잡힐 경우 숫자만 있는 라운드 시도
+      // "N회 | 숫자 | 숫자 | 숫자 | 숫자" (결과 텍스트 없이 진행 중인 경우)
+      if (rounds.length === 0) {
+        const fallbackPattern = /(\d)회\s+([\d-]+\s+[\d:]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/g;
+        while ((match = fallbackPattern.exec(body)) !== null) {
+          const dl = parseFloat(match[3]);
+          rounds.push({
+            round: parseInt(match[1], 10),
+            download_mbps: dl,
+            upload_mbps: parseFloat(match[4]),
+            ping_ms: parseFloat(match[5]),
+            passed: dl >= minSpeedArg,
+          });
+        }
+      }
+
+      // 완료 감지: 측정 횟수 5회 또는 5개 라운드 모두 데이터 존재
+      const isComplete =
+        measureCount >= 5 ||
+        rounds.length >= 5;
+
+      return { rounds, summary, isComplete };
+    }, minSpeed).catch(() => ({
+      rounds: [] as SpeedTestRound[],
+      summary: null,
+      isComplete: false,
+    }));
+  }
+
+  /**
+   * 일반 속도측정 페이지 (/speed/) body 텍스트 파싱
+   */
+  private async parseNormalPage(measurePage: Page): Promise<{
+    downloadMbps: number;
+    uploadMbps: number;
+    latencyMs: number;
+    isComplete: boolean;
+    hasResults: boolean;
+  }> {
+    return measurePage.evaluate(() => {
+      const body = document.body.innerText || '';
+
+      let downloadMbps = 0;
+      const dlMatch = body.match(/다운로드\s*속도[\s\S]*?(\d+\.?\d*)\s*Mbps/i);
+      if (dlMatch) downloadMbps = parseFloat(dlMatch[1]);
+
+      let uploadMbps = 0;
+      const ulMatch = body.match(/업로드\s*속도[\s\S]*?(\d+\.?\d*)\s*Mbps/i);
+      if (ulMatch) uploadMbps = parseFloat(ulMatch[1]);
+
+      let latencyMs = 0;
+      const rttMatch = body.match(/평균\s*\(RTT\)\s*(\d+\.?\d*)\s*ms/i);
+      if (rttMatch) latencyMs = parseFloat(rttMatch[1]);
+
+      const hasReadyText = body.includes('준비 중');
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const startBtn = buttons.find((b) => (b.innerText || '').includes('측정시작'));
+      const btnReEnabled = startBtn ? !startBtn.disabled : false;
+
+      const hasResults = downloadMbps > 0;
+      const isComplete = hasResults && (!hasReadyText || btnReEnabled);
+
+      return { downloadMbps, uploadMbps, latencyMs, isComplete, hasResults };
+    }).catch(() => ({
+      downloadMbps: 0, uploadMbps: 0, latencyMs: 0,
+      isComplete: false, hasResults: false,
+    }));
   }
 
   /**
@@ -844,6 +981,8 @@ export class LGUplusProvider {
           rounds,
         },
         error: '',
+        sla_summary: sla ? this._lastSlaSummary : undefined,
+        sla_claim_api_available: sla ? true : undefined, // myspeed /api/v1/update_sla_claim 존재 확인됨
       };
 
       // SLA 미달 안내
@@ -852,13 +991,24 @@ export class LGUplusProvider {
         console.log('='.repeat(60));
         console.log('  SLA 기준 미달 확인!');
         console.log(`  ${rounds.length}회 중 ${failCount}회 최저보장속도 미달`);
+        if (this._lastSlaSummary) {
+          console.log(`  최저속도미달율: ${this._lastSlaSummary.fail_percent}%`);
+        }
         console.log('');
         console.log('  >>> 101 (LGU+ 고객센터)에 전화하여 요금 감면을 신청하세요.');
         console.log('  >>> "SLA 기준 미달로 당일 요금 감면 신청합니다" 라고 말씀하세요.');
+        if (sla) {
+          console.log('');
+          console.log('  [참고] myspeed.uplus.co.kr에 SLA 감면 API(/api/v1/update_sla_claim) 존재 확인');
+          console.log('  향후 자동 감면 신청 기능이 추가될 수 있습니다.');
+        }
         console.log('='.repeat(60));
         console.log('');
         result.complaint_result = 'skipped';
       }
+
+      // 임시 저장 초기화
+      this._lastSlaSummary = undefined;
 
       return result;
     } catch (err) {
