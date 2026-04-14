@@ -10,8 +10,8 @@ LG U+ 인터넷 SLA 속도 미달 시 요금 감면을 도와주는 CLI 도구.
 30분 동안 5회 측정 시 **3회 이상** 최저보장속도 미달이면 **당일 요금 감면** 대상입니다.
 
 이 도구는:
-1. Playwright(headless Chrome)로 LG U+ 속도측정 페이지에 자동 접속
-2. SLA 5회 측정을 자동 실행
+1. Playwright(headless Chrome)로 LG U+ OAuth2 허브(account.lguplus.com) 경유 자동 로그인
+2. 속도측정 페이지에서 SLA 5회 측정을 자동 실행 (page.evaluate 폴링, 15초 간격)
 3. 결과를 DB에 기록하고 Discord/Telegram으로 알림
 4. SLA 미달 시 **101(고객센터) 전화 안내** 발송
 
