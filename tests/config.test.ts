@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getDefaultConfig } from '../src/core/config';
+import { getDefaultConfig, validateConfig } from '../src/core/config';
 
 describe('getDefaultConfig', () => {
   it('기본 설정을 올바르게 반환한다', () => {
@@ -23,5 +23,33 @@ describe('getDefaultConfig', () => {
   it('db_path가 lguplus를 포함한다', () => {
     const config = getDefaultConfig();
     expect(config.db_path).toContain('lguplus');
+  });
+});
+
+describe('validateConfig', () => {
+  it('기본 설정(빈 값)은 credentials 에러를 반환한다', () => {
+    const config = getDefaultConfig();
+    const errors = validateConfig(config);
+    expect(errors.length).toBeGreaterThanOrEqual(2);
+    expect(errors.some(e => e.includes('credentials.id'))).toBe(true);
+    expect(errors.some(e => e.includes('credentials.password'))).toBe(true);
+  });
+
+  it('모든 필수 필드가 채워지면 에러가 없다', () => {
+    const config = getDefaultConfig();
+    config.credentials.id = 'testuser';
+    config.credentials.password = 'testpass';
+    config.plan.speed_mbps = 500;
+    const errors = validateConfig(config);
+    expect(errors).toEqual([]);
+  });
+
+  it('speed_mbps가 0이면 에러를 반환한다', () => {
+    const config = getDefaultConfig();
+    config.credentials.id = 'testuser';
+    config.credentials.password = 'testpass';
+    config.plan.speed_mbps = 0;
+    const errors = validateConfig(config);
+    expect(errors.some(e => e.includes('plan.speed_mbps'))).toBe(true);
   });
 });

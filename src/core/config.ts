@@ -49,8 +49,8 @@ export function ensureDataDir(): void {
   }
 }
 
-export function loadConfig(): Config {
-  const configPath = getConfigPath();
+export function loadConfig(customPath?: string): Config {
+  const configPath = customPath || getConfigPath();
   if (!fs.existsSync(configPath)) {
     throw new Error(
       `설정 파일이 없습니다: ${configPath}\n` +
@@ -102,6 +102,21 @@ export function saveConfig(config: Config): void {
   fs.writeFileSync(configPath, content, { encoding: 'utf-8', mode: 0o600 });
 }
 
-export function configExists(): boolean {
-  return fs.existsSync(getConfigPath());
+export function configExists(customPath?: string): boolean {
+  return fs.existsSync(customPath || getConfigPath());
+}
+
+/** 설정 필수 필드 검증. 비어있거나 0인 필수 필드에 대해 에러 메시지 배열 반환 */
+export function validateConfig(config: Config): string[] {
+  const errors: string[] = [];
+  if (!config.credentials.id) {
+    errors.push('credentials.id (LG U+ 아이디)가 비어 있습니다.');
+  }
+  if (!config.credentials.password) {
+    errors.push('credentials.password (LG U+ 비밀번호)가 비어 있습니다.');
+  }
+  if (!config.plan.speed_mbps || config.plan.speed_mbps <= 0) {
+    errors.push('plan.speed_mbps (계약 속도)가 설정되지 않았습니다.');
+  }
+  return errors;
 }

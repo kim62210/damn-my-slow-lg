@@ -21,6 +21,7 @@ export interface DBDriver {
   getAll(): SpeedTestRecord[];
   getRecent(limit: number): SpeedTestRecord[];
   getRecentByProvider(limit: number, provider: string): SpeedTestRecord[];
+  getRecordsSince(sinceDate: string): SpeedTestRecord[];
   getTodayRecords(): SpeedTestRecord[];
   hasComplaintSuccessToday(): boolean;
   hasSlaFailToday(): boolean;
@@ -72,6 +73,10 @@ class JsonDriver implements DBDriver {
       .filter(r => r.isp === provider)
       .slice(-limit)
       .reverse();
+  }
+
+  getRecordsSince(sinceDate: string): SpeedTestRecord[] {
+    return this.records.filter(r => r.tested_at >= sinceDate);
   }
 
   getTodayRecords(): SpeedTestRecord[] {
@@ -160,6 +165,12 @@ class SqliteDriver implements DBDriver {
     return this.db.prepare(
       'SELECT * FROM speed_tests WHERE isp = ? ORDER BY id DESC LIMIT ?'
     ).all(provider, limit);
+  }
+
+  getRecordsSince(sinceDate: string): SpeedTestRecord[] {
+    return this.db.prepare(
+      'SELECT * FROM speed_tests WHERE tested_at >= ? ORDER BY id DESC'
+    ).all(sinceDate);
   }
 
   getTodayRecords(): SpeedTestRecord[] {

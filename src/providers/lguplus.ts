@@ -123,9 +123,18 @@ export class LGUplusProvider {
 
   /** 브라우저 초기화 */
   async init(): Promise<void> {
-    this.browser = await chromium.launch({
-      headless: this.config.headless,
-    });
+    try {
+      this.browser = await chromium.launch({
+        headless: this.config.headless,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.toLowerCase().includes('playwright') || msg.toLowerCase().includes('browser') || msg.toLowerCase().includes('chromium') || msg.toLowerCase().includes('executable')) {
+        console.error('Playwright Chromium이 설치되지 않았습니다.');
+        console.error('다음 명령으로 설치해주세요: npx playwright install chromium');
+      }
+      throw err;
+    }
     this.context = await this.browser.newContext({
       locale: 'ko-KR',
       timezoneId: 'Asia/Seoul',

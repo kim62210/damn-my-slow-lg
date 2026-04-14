@@ -199,6 +199,43 @@ describe('hasComplaintSuccessToday / hasSlaFailToday', () => {
   });
 });
 
+describe('getRecordsSince', () => {
+  it('지정 날짜 이후 레코드만 반환한다', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = createDB(dbPath);
+
+    const old = new Date(Date.now() - 10 * 86400000).toISOString();
+    const recent = new Date(Date.now() - 2 * 86400000).toISOString();
+    const today = new Date().toISOString();
+
+    db.insert(makeRecord({ tested_at: old, download_mbps: 100 }));
+    db.insert(makeRecord({ tested_at: recent, download_mbps: 200 }));
+    db.insert(makeRecord({ tested_at: today, download_mbps: 300 }));
+
+    const sinceDate = new Date(Date.now() - 5 * 86400000).toISOString();
+    const records = db.getRecordsSince(sinceDate);
+    expect(records).toHaveLength(2);
+    const speeds = records.map(r => r.download_mbps).sort((a, b) => a - b);
+    expect(speeds).toEqual([200, 300]);
+    db.close();
+  });
+
+  it('해당 기간에 레코드가 없으면 빈 배열', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = createDB(dbPath);
+
+    const old = new Date(Date.now() - 60 * 86400000).toISOString();
+    db.insert(makeRecord({ tested_at: old }));
+
+    const sinceDate = new Date(Date.now() - 5 * 86400000).toISOString();
+    const records = db.getRecordsSince(sinceDate);
+    expect(records).toHaveLength(0);
+    db.close();
+  });
+});
+
 describe('resultToRecord', () => {
   it('SpeedTestResult를 SpeedTestRecord로 올바르게 변환한다', () => {
     const result: SpeedTestResult = {

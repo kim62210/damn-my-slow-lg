@@ -10,7 +10,7 @@ import Table from 'cli-table3';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
-import { loadConfig, saveConfig, configExists, getDefaultConfig, ensureDataDir, DATA_DIR } from './core/config';
+import { loadConfig, saveConfig, configExists, getDefaultConfig, ensureDataDir, DATA_DIR, validateConfig } from './core/config';
 import { createDB, resultToRecord } from './core/db';
 import { notify, shouldThrottleNotify, needsRecoveryNotify } from './core/notify';
 import { getMinGuaranteedSpeed } from './core/sla';
@@ -38,7 +38,13 @@ const program = new Command();
 program
   .name('damn-my-slow-lg')
   .description('LG U+ 인터넷 SLA 속도 미달 시 요금 감면을 도와주는 CLI 도구')
-  .version('0.1.0');
+  .version('0.1.0')
+  .option('-c, --config <path>', '설정 파일 경로');
+
+/** 글로벌 --config 옵션 값을 가져오는 헬퍼 */
+function getConfigPath(): string | undefined {
+  return program.opts().config as string | undefined;
+}
 
 /** init - 초기 설정 */
 program
@@ -47,7 +53,7 @@ program
   .action(async () => {
     console.log(chalk.magenta.bold('\n  damn-my-slow-lg 초기 설정\n'));
 
-    const existing = configExists();
+    const existing = configExists(getConfigPath());
     if (existing) {
       const { overwrite } = await inquirer.prompt([{
         type: 'confirm',
@@ -142,8 +148,9 @@ program
   .option('--provider <provider>', '측정 프로바이더 (lguplus | ookla)', 'lguplus')
   .option('--sla', 'SLA 5회 측정 모드', false)
   .option('--history', '측정 없이 이력 스크래핑 모드 (최근 측정 이력만 수집)', false)
-  .action(async (options: { dryRun: boolean; notify: boolean; provider: string; sla: boolean; history: boolean }) => {
-    if (!configExists()) {
+  .option('--force', '당일 제한(stop_on_complaint_success) 무시', false)
+  .action(async (options: { dryRun: boolean; notify: boolean; provider: string; sla: boolean; history: boolean; force: boolean }) => {
+    if (!configExists(getConfigPath())) {
       console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
       process.exit(1);
     }
@@ -154,10 +161,20 @@ program
     }
 
     try {
-    const config = loadConfig();
+    const config = loadConfig(getConfigPath());
+
+    // 필수 필드 검증
+    const validationErrors = validateConfig(config);
+    if (validationErrors.length > 0) {
+      console.error(chalk.red('설정 검증 실패:'));
+      for (const err of validationErrors) {
+        console.error(chalk.red(`  - ${err}`));
+      }
+      process.exit(1);
+    }
 
     // stop_on_complaint_success: 오늘 이미 감면 성공 또는 SLA fail 기록이 있으면 스킵
-    if (config.schedule.stop_on_complaint_success && !options.history) {
+    if (config.schedule.stop_on_complaint_success && !options.force && !options.history) {
       const db = createDB(config.db_path);
       try {
         if (db.hasComplaintSuccessToday()) {
@@ -348,11 +365,11 @@ program
       return;
     }
 
-    if (!configExists()) {
+    if (!configExists(getConfigPath())) {
       console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
       process.exit(1);
     }
-    const config = loadConfig();
+    const config = loadConfig(getConfigPath());
     const result = installScheduler(config.schedule);
     console.log(chalk.green(`스케줄 등록 완료: ${result}`));
     console.log(`  시작 시각: ${config.schedule.time}`);
@@ -368,11 +385,11 @@ program
   .option('--today', '오늘 기록만 표시')
   .option('--provider <provider>', '특정 프로바이더 기록만 표시 (lguplus | ookla)')
   .action((options: { limit: string; today: boolean; provider?: string }) => {
-    if (!configExists()) {
+    if (!configExists(getConfigPath())) {
       console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
       process.exit(1);
     }
-    const config = loadConfig();
+    const config = loadConfig(getConfigPath());
     const db = createDB(config.db_path);
 
     let records: SpeedTestRecord[];
@@ -422,11 +439,11 @@ program
   .description('LG U+ 속도측정 페이지 DOM 구조 자동 탐지 및 확인')
   .option('--dump-dom', '현재 페이지 DOM 구조를 파일로 덤프')
   .action(async (options: { dumpDom: boolean }) => {
-    if (!configExists()) {
+    if (!configExists(getConfigPath())) {
       console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
       process.exit(1);
     }
-    const config = loadConfig();
+    const config = loadConfig(getConfigPath());
     const provider = new LGUplusProvider(config);
 
     console.log(chalk.magenta.bold('\n  damn-my-slow-lg 캘리브레이션\n'));
@@ -561,11 +578,11 @@ program
     console.log(chalk.magenta.bold('\n  damn-my-slow-lg 상태\n'));
 
     // 1. 설정 파일
-    const hasConfig = configExists();
+    const hasConfig = configExists(getConfigPath());
     console.log(chalk.bold('  [설정]'));
     if (hasConfig) {
-      console.log(chalk.green(`    설정 파일: ${DATA_DIR}/config-lguplus.yaml`));
-      const config = loadConfig();
+      console.log(chalk.green(`    설정 파일: ${getConfigPath() || `${DATA_DIR}/config-lguplus.yaml`}`));
+      const config = loadConfig(getConfigPath());
       console.log(`    계약 속도: ${config.plan.speed_mbps} Mbps`);
       console.log(`    최저보장: ${getMinGuaranteedSpeed(config.plan.speed_mbps)} Mbps`);
       console.log(`    알림 - Discord: ${config.notification.discord_webhook ? 'ON' : 'OFF'}`);
@@ -578,7 +595,7 @@ program
     // 2. DB 상태
     console.log(chalk.bold('  [DB]'));
     if (hasConfig) {
-      const config = loadConfig();
+      const config = loadConfig(getConfigPath());
       const db = createDB(config.db_path);
       try {
         const totalCount = db.count();
@@ -678,6 +695,66 @@ program
     }
 
     console.log('');
+  });
+
+/** report - 통계 요약 */
+program
+  .command('report')
+  .description('측정 통계 요약 보고서')
+  .option('--days <n>', '조회 기간 (일)', '30')
+  .action((options: { days: string }) => {
+    if (!configExists(getConfigPath())) {
+      console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
+      process.exit(1);
+    }
+    const config = loadConfig(getConfigPath());
+    const db = createDB(config.db_path);
+    const days = parseInt(options.days, 10) || 30;
+
+    try {
+      const sinceDate = new Date(Date.now() - days * 86400000).toISOString();
+      const records = db.getRecordsSince(sinceDate);
+
+      if (records.length === 0) {
+        console.log(chalk.yellow(`최근 ${days}일간 측정 기록이 없습니다.`));
+        return;
+      }
+
+      const totalCount = records.length;
+      const passCount = records.filter(r => r.sla_result === 'pass').length;
+      const failCount = records.filter(r => r.sla_result === 'fail').length;
+      const unknownCount = records.filter(r => r.sla_result !== 'pass' && r.sla_result !== 'fail').length;
+
+      const avgDl = records.reduce((sum, r) => sum + r.download_mbps, 0) / totalCount;
+      const avgUl = records.reduce((sum, r) => sum + r.upload_mbps, 0) / totalCount;
+
+      // 감면 대상일 수: 날짜별로 SLA fail이 1건 이상인 날 카운트
+      const failDays = new Set(
+        records.filter(r => r.sla_result === 'fail').map(r => r.tested_at.slice(0, 10))
+      ).size;
+
+      console.log(chalk.magenta.bold(`\n  damn-my-slow-lg 통계 보고서 (최근 ${days}일)\n`));
+
+      const table = new Table({
+        head: ['항목', '값'],
+        colAligns: ['left', 'right'],
+      });
+
+      table.push(
+        ['총 측정 횟수', `${totalCount}회`],
+        ['PASS', `${passCount}회 (${(passCount / totalCount * 100).toFixed(1)}%)`],
+        ['FAIL', `${failCount}회 (${(failCount / totalCount * 100).toFixed(1)}%)`],
+        ['UNKNOWN', `${unknownCount}회`],
+        ['평균 다운로드', `${avgDl.toFixed(1)} Mbps`],
+        ['평균 업로드', `${avgUl.toFixed(1)} Mbps`],
+        ['감면 대상일 수', `${failDays}일`],
+      );
+
+      console.log(table.toString());
+      console.log('');
+    } finally {
+      db.close();
+    }
   });
 
 /** 결과 출력 헬퍼 */
