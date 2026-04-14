@@ -16,7 +16,22 @@ import { notify } from './core/notify';
 import { getMinGuaranteedSpeed } from './core/sla';
 import { installScheduler, uninstallScheduler } from './core/scheduler';
 import { LGUplusProvider } from './providers/lguplus';
+import { acquireLock, releaseLock } from './core/lockfile';
 import type { Config, HistoryRecord, NotifyPayload, SpeedTestRecord, SpeedTestResult } from './types';
+
+let activeProvider: { cleanup(): Promise<void> } | null = null;
+
+async function gracefulShutdown(): Promise<void> {
+  console.log('\n종료 중...');
+  if (activeProvider) {
+    await activeProvider.cleanup().catch(() => {});
+  }
+  releaseLock();
+  process.exit(0);
+}
+
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
 
 const program = new Command();
 
@@ -128,6 +143,17 @@ program
   .option('--sla', 'SLA 5회 측정 모드', false)
   .option('--history', '측정 없이 이력 스크래핑 모드 (최근 측정 이력만 수집)', false)
   .action(async (options: { dryRun: boolean; notify: boolean; provider: string; sla: boolean; history: boolean }) => {
+    if (!configExists()) {
+      console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
+      process.exit(1);
+    }
+
+    if (!acquireLock()) {
+      console.error('다른 인스턴스가 실행 중입니다.');
+      process.exit(1);
+    }
+
+    try {
     const config = loadConfig();
 
     // --history 모드: 측정 없이 이력만 스크래핑
@@ -245,7 +271,9 @@ program
       }
     } else {
       const provider = new LGUplusProvider(config);
-      result = await provider.run(options.dryRun);
+      activeProvider = provider;
+      result = await provider.run(options.dryRun, options.sla);
+      activeProvider = null;
     }
 
     // DB 저장
@@ -276,6 +304,10 @@ program
       await notify(config.notification, payload);
       console.log(chalk.gray('알림 발송 완료'));
     }
+    } finally {
+      activeProvider = null;
+      releaseLock();
+    }
   });
 
 /** schedule - 스케줄러 등록/해제 */
@@ -290,6 +322,10 @@ program
       return;
     }
 
+    if (!configExists()) {
+      console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
+      process.exit(1);
+    }
     const config = loadConfig();
     const result = installScheduler(config.schedule);
     console.log(chalk.green(`스케줄 등록 완료: ${result}`));
@@ -306,6 +342,10 @@ program
   .option('--today', '오늘 기록만 표시')
   .option('--provider <provider>', '특정 프로바이더 기록만 표시 (lguplus | ookla)')
   .action((options: { limit: string; today: boolean; provider?: string }) => {
+    if (!configExists()) {
+      console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
+      process.exit(1);
+    }
     const config = loadConfig();
     const db = createDB(config.db_path);
 
@@ -356,6 +396,10 @@ program
   .description('LG U+ 속도측정 페이지 DOM 구조 자동 탐지 및 확인')
   .option('--dump-dom', '현재 페이지 DOM 구조를 파일로 덤프')
   .action(async (options: { dumpDom: boolean }) => {
+    if (!configExists()) {
+      console.error('설정 파일이 없습니다. damn-my-slow-lg init 명령으로 초기 설정을 진행해주세요.');
+      process.exit(1);
+    }
     const config = loadConfig();
     const provider = new LGUplusProvider(config);
 
