@@ -2,15 +2,22 @@
  * LG U+ 속도측정 Provider
  *
  * 측정 플로우:
- * 1. www.lguplus.com 로그인
+ * 1. account.lguplus.com OAuth2 허브 경유 로그인
+ *    - www.lguplus.com/login -> account.lguplus.com/login 리다이렉트
+ *    - "U+ID" 버튼 클릭 -> /login/email 페이지
+ *    - input[name="id"] / input[name="password"] 입력 -> submit
+ *    - reCAPTCHA v3 (invisible) 자동 통과
  * 2. 고객지원 > 간편해결 > 인터넷 속도 측정 이동
  * 3. "최저보장속도 측정(SLA)" 버튼 클릭
- * 4. 5회 자동 측정 완료 대기
+ * 4. 5회 자동 측정 완료 대기 (15초 폴링, 40분 타임아웃)
  * 5. 결과 파싱 및 SLA 판정
- * 6. 감면 대상 시 알림 (전화 101 안내)
+ * 6. 감면 대상 시 안내 (전화 101)
  *
- * NOTE: DOM 선택자는 LGU+ 네트워크에서 `damn-my-slow-lg calibrate` 실행하여 확인 필요.
- *       LGU+ 웹사이트 업데이트 시 선택자가 변경될 수 있음.
+ * 주요 특징:
+ * - CSS 해시 클래스 사용 금지 (Nuxt.js SPA, 빌드마다 변경됨)
+ * - 다중 fallback 선택자 패턴 (배열 순회)
+ * - page.evaluate() 기반 DOM 직접 검사 (폴링)
+ * - 모든 주요 단계에서 스냅샷 저장
  */
 
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
@@ -22,65 +29,68 @@ import { DATA_DIR } from '../core/config';
 
 /** LGU+ 웹사이트 URL */
 const URLS = {
-  /** 메인 (Nuxt.js SPA) */
-  main: 'https://www.lguplus.com',
-  /** 로그인 페이지 */
   login: 'https://www.lguplus.com/login',
-  /** 고객지원 > 간편해결 > 인터넷/전화 속도측정 */
-  speedTest: 'https://www.lguplus.com/support/internet-phone/speed-check',
-  /** 전용 속도측정 서버 (LGU+ 네트워크 전용) */
-  speedTestDirect: 'http://speedtest.uplus.co.kr/',
-};
-
-/**
- * DOM 선택자 (LGU+ 사이트 구조에 따라 업데이트 필요)
- *
- * `damn-my-slow-lg calibrate` 명령으로 실제 페이지에서 확인 가능.
- * LGU+ 사이트가 Nuxt.js SPA이므로 동적 렌더링 대기 필요.
- */
-const SELECTORS = {
-  /** 로그인 */
-  login: {
-    idInput: 'input[name="userId"], input#userId, input[placeholder*="아이디"]',
-    passwordInput: 'input[name="userPw"], input#userPw, input[type="password"]',
-    submitButton: 'button[type="submit"], button:has-text("로그인")',
-    /** 팝업 닫기 (USIM 안내 등) */
-    popupClose: 'button:has-text("닫기"), .popup-close, [class*="close"]',
-  },
-  /** 속도측정 */
-  speedTest: {
-    /** SLA 측정 시작 버튼 */
-    slaButton: 'button:has-text("최저보장속도"), button:has-text("SLA"), a:has-text("SLA")',
-    /** 일반 속도측정 시작 버튼 */
-    startButton: 'button:has-text("측정 시작"), button:has-text("속도측정"), button:has-text("시작")',
-    /** 측정 진행 중 표시 */
-    progressIndicator: '[class*="progress"], [class*="loading"], .measuring',
-    /** 측정 완료 표시 */
-    completeIndicator: '[class*="complete"], [class*="result"], .test-complete',
-    /** 다운로드 속도 결과 */
-    downloadResult: '[class*="download"] [class*="speed"], [class*="download"] [class*="value"]',
-    /** 업로드 속도 결과 */
-    uploadResult: '[class*="upload"] [class*="speed"], [class*="upload"] [class*="value"]',
-    /** 핑 결과 */
-    pingResult: '[class*="ping"] [class*="value"], [class*="latency"]',
-    /** SLA 판정 결과 (통과/미달) */
-    slaResultText: '[class*="result"], [class*="sla-result"]',
-    /** 개별 라운드 결과 행 */
-    roundRows: 'table tr, [class*="round"], [class*="step"]',
-  },
-  /** 회선 선택 (다회선 사용자) */
-  lineSelect: {
-    lineOptions: 'label:has-text("회선"), [class*="line-select"] option',
-    confirmButton: 'button:has-text("확인"), button:has-text("선택")',
-  },
+  /** OAuth2 허브 (리다이렉트 목적지) */
+  oauthHub: 'https://account.lguplus.com/login',
+  /** 이메일 로그인 (U+ID 선택 후) */
+  oauthEmail: 'https://account.lguplus.com/login/email',
+  /** 속도측정 페이지 */
+  speedTest: 'https://www.lguplus.com/support/self-troubleshoot/internet-speed-test',
 };
 
 /** 폴링 간격 (ms) */
 const POLL_INTERVAL = 15_000;
 /** 측정 타임아웃 (ms) - 40분 */
 const MEASURE_TIMEOUT = 40 * 60 * 1000;
-/** 페이지 로드 대기 (ms) */
-const PAGE_LOAD_WAIT = 5_000;
+/** 네비게이션 타임아웃 (ms) */
+const NAV_TIMEOUT = 30_000;
+/** SPA 렌더링 대기 (ms) */
+const SPA_SETTLE = 3_000;
+/** 최대 재시도 횟수 */
+const MAX_RETRIES = 2;
+
+/**
+ * 다중 fallback 선택자에서 첫 번째로 보이는 요소를 찾는다.
+ * 배열의 각 선택자를 순서대로 시도하여 visible 요소를 반환.
+ */
+async function findFirstVisible(page: Page, selectors: string[], timeout = 10_000): Promise<ReturnType<Page['locator']> | null> {
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 500 }).catch(() => false)) {
+          return loc;
+        }
+      } catch {
+        // 다음 선택자 시도
+      }
+    }
+    await page.waitForTimeout(500);
+  }
+  return null;
+}
+
+/**
+ * 선택자 배열 중 아무거나 클릭 가능하면 클릭한다.
+ * 팝업/모달 닫기 등 "있으면 클릭, 없으면 무시" 패턴.
+ */
+async function tryClick(page: Page, selectors: string[]): Promise<boolean> {
+  for (const sel of selectors) {
+    try {
+      const loc = page.locator(sel).first();
+      if (await loc.isVisible({ timeout: 1_000 }).catch(() => false)) {
+        await loc.click();
+        await page.waitForTimeout(800);
+        return true;
+      }
+    } catch {
+      // 다음 선택자 시도
+    }
+  }
+  return false;
+}
 
 export class LGUplusProvider {
   private config: Config;
@@ -101,7 +111,9 @@ export class LGUplusProvider {
       locale: 'ko-KR',
       timezoneId: 'Asia/Seoul',
       viewport: { width: 1280, height: 720 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     });
     this.page = await this.context.newPage();
   }
@@ -116,87 +128,207 @@ export class LGUplusProvider {
     this.browser = null;
   }
 
-  /** LGU+ 로그인 */
+  /**
+   * LGU+ OAuth2 로그인
+   *
+   * Step 1: www.lguplus.com/login -> account.lguplus.com/login 리다이렉트
+   * Step 2: "U+ID" 버튼 클릭 -> /login/email 페이지
+   * Step 3: ID/PW 입력, submit
+   */
   private async login(): Promise<void> {
     const page = this.getPage();
     const { credentials } = this.config;
 
-    console.log('[LGU+] 로그인 중...');
-    await page.goto(URLS.login, { waitUntil: 'networkidle', timeout: 30_000 });
-    await page.waitForTimeout(PAGE_LOAD_WAIT);
+    console.log('[LGU+] 로그인 시작...');
 
-    // 팝업 닫기 시도
-    await this.dismissPopups();
+    // Step 1: 로그인 페이지 진입 (OAuth 허브로 리다이렉트됨)
+    await page.goto(URLS.login, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    await page.waitForTimeout(SPA_SETTLE);
 
-    // 아이디 입력
-    const idInput = await page.waitForSelector(SELECTORS.login.idInput, { timeout: 10_000 });
-    if (!idInput) throw new Error('로그인 아이디 입력란을 찾을 수 없습니다.');
-    await idInput.fill(credentials.id);
+    // account.lguplus.com 리다이렉트 대기
+    try {
+      await page.waitForURL('**/account.lguplus.com/**', { timeout: 15_000 });
+    } catch {
+      // 이미 리다이렉트되었거나 직접 접근된 경우
+      console.log(`[LGU+] 현재 URL: ${page.url()}`);
+    }
 
-    // 비밀번호 입력
-    const pwInput = await page.waitForSelector(SELECTORS.login.passwordInput, { timeout: 5_000 });
-    if (!pwInput) throw new Error('비밀번호 입력란을 찾을 수 없습니다.');
-    await pwInput.fill(credentials.password);
+    await this.saveSnapshot('login-hub');
 
-    // 로그인 버튼 클릭
-    const submitBtn = await page.waitForSelector(SELECTORS.login.submitButton, { timeout: 5_000 });
-    if (!submitBtn) throw new Error('로그인 버튼을 찾을 수 없습니다.');
+    // Step 2: "U+ID" 버튼 클릭 (OAuth 허브에서 로그인 방식 선택)
+    const uplusIdButtonSelectors = [
+      'button:has-text("U+ID")',
+      'a:has-text("U+ID")',
+      'button:has-text("U+ ID")',
+      'a:has-text("U+ ID")',
+      '[data-testid="uplusid-login"]',
+    ];
+
+    const uplusIdBtn = await findFirstVisible(page, uplusIdButtonSelectors, 8_000);
+    if (uplusIdBtn) {
+      console.log('[LGU+] "U+ID" 버튼 클릭');
+      await uplusIdBtn.click();
+      await page.waitForTimeout(SPA_SETTLE);
+    } else {
+      // 이미 email 로그인 페이지이거나 버튼이 없는 경우
+      console.log('[LGU+] U+ID 버튼 미발견, 현재 페이지에서 로그인 시도');
+    }
+
+    // Step 3: ID/PW 입력
+    console.log('[LGU+] 자격증명 입력 중...');
+
+    // ID 필드 - 다중 fallback
+    const idSelectors = [
+      'input[name="id"]',
+      'input[aria-label*="이메일"]',
+      'input[aria-label*="휴대폰"]',
+      'input[placeholder*="이메일"]',
+      'input[placeholder*="아이디"]',
+      'input[type="text"]:not([name="password"])',
+    ];
+
+    const idField = await findFirstVisible(page, idSelectors);
+    if (!idField) {
+      await this.saveSnapshot('login-id-not-found');
+      throw new Error(
+        '로그인 ID 입력란을 찾을 수 없습니다. ' +
+        'account.lguplus.com 페이지 구조가 변경되었을 수 있습니다.'
+      );
+    }
+
+    await idField.fill(credentials.id);
+    await page.waitForTimeout(300);
+
+    // PW 필드 - 다중 fallback
+    const pwSelectors = [
+      'input[name="password"]',
+      'input[type="password"]',
+      'input[aria-label*="비밀번호"]',
+      'input[placeholder*="비밀번호"]',
+    ];
+
+    const pwField = await findFirstVisible(page, pwSelectors, 5_000);
+    if (!pwField) {
+      await this.saveSnapshot('login-pw-not-found');
+      throw new Error('비밀번호 입력란을 찾을 수 없습니다.');
+    }
+
+    await pwField.fill(credentials.password);
+    await page.waitForTimeout(300);
+
+    await this.saveSnapshot('login-filled');
+
+    // 로그인 버튼 클릭 (form 태그 없음, React SPA JS 핸들러)
+    const submitSelectors = [
+      'button[type="submit"]',
+      'button:has-text("로그인")',
+      'button:has-text("로그인"):not([disabled])',
+      'input[type="submit"]',
+    ];
+
+    const submitBtn = await findFirstVisible(page, submitSelectors, 5_000);
+    if (!submitBtn) {
+      await this.saveSnapshot('login-submit-not-found');
+      throw new Error('로그인 버튼을 찾을 수 없습니다.');
+    }
+
     await submitBtn.click();
 
-    // 로그인 완료 대기
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {});
-    await page.waitForTimeout(PAGE_LOAD_WAIT);
+    // 로그인 완료 대기 (SPA 전환이므로 URL 변화 또는 DOM 변화 감지)
+    try {
+      await page.waitForURL(
+        (url) => !url.href.includes('account.lguplus.com/login'),
+        { timeout: 15_000 }
+      );
+    } catch {
+      // URL이 안 바뀌어도 로그인 실패/성공 여부는 이후 확인
+      console.log('[LGU+] 로그인 후 URL 전환 대기 타임아웃');
+    }
 
-    // 비밀번호 변경 안내 등 팝업 닫기
+    await page.waitForTimeout(SPA_SETTLE);
+
+    // 비밀번호 변경 안내/팝업 닫기
     await this.dismissPopups();
 
+    // 로그인 성공 확인 (account.lguplus.com에 여전히 있으면 실패)
+    const currentUrl = page.url();
+    if (currentUrl.includes('account.lguplus.com/login')) {
+      await this.saveSnapshot('login-failed');
+      throw new Error(
+        '로그인에 실패했습니다. 아이디/비밀번호를 확인하세요. ' +
+        `현재 URL: ${currentUrl}`
+      );
+    }
+
+    await this.saveSnapshot('login-success');
     console.log('[LGU+] 로그인 완료');
   }
 
-  /** 팝업 닫기 (USIM 안내, 비밀번호 변경 등) */
+  /** 팝업/모달 닫기 (비밀번호 변경, USIM 안내, 광고 등) */
   private async dismissPopups(): Promise<void> {
-    const page = this.getPage();
-    const closeSelectors = [
-      SELECTORS.login.popupClose,
+    const popupCloseSelectors = [
+      'button:has-text("닫기")',
       'button:has-text("확인")',
       'button:has-text("다음에")',
       'button:has-text("나중에")',
+      'button:has-text("다음에 변경")',
+      'button[aria-label="닫기"]',
+      'button[aria-label="close"]',
     ];
 
-    for (const selector of closeSelectors) {
-      try {
-        const btn = await page.$(selector);
-        if (btn && await btn.isVisible()) {
-          await btn.click();
-          await page.waitForTimeout(1000);
-        }
-      } catch {
-        // 팝업이 없으면 무시
-      }
+    // 최대 3번 반복 (중첩 팝업 대응)
+    for (let i = 0; i < 3; i++) {
+      const clicked = await tryClick(this.getPage(), popupCloseSelectors);
+      if (!clicked) break;
     }
   }
 
-  /** 속도측정 페이지로 이동 */
+  /** 속도측정 페이지로 이동 (재시도 포함) */
   private async navigateToSpeedTest(): Promise<void> {
     const page = this.getPage();
 
-    console.log('[LGU+] 속도측정 페이지 이동 중...');
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      console.log(`[LGU+] 속도측정 페이지 이동 중... (시도 ${attempt + 1}/${MAX_RETRIES + 1})`);
 
-    // 직접 URL 접근 시도
-    await page.goto(URLS.speedTest, { waitUntil: 'networkidle', timeout: 30_000 });
-    await page.waitForTimeout(PAGE_LOAD_WAIT);
-    await this.dismissPopups();
+      try {
+        await page.goto(URLS.speedTest, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+        await page.waitForTimeout(SPA_SETTLE);
 
-    // SLA 전용 측정 페이지로 리다이렉트될 수 있음
-    // 페이지 URL 확인
-    const currentUrl = page.url();
-    console.log(`[LGU+] 현재 페이지: ${currentUrl}`);
+        // 로그인 페이지로 리다이렉트되었는지 확인
+        if (page.url().includes('account.lguplus.com')) {
+          console.log('[LGU+] 로그인 세션 만료, 재로그인 시도');
+          await this.login();
+          continue;
+        }
 
-    // 메인 페이지로 돌아갔으면 speedtest 서버 직접 시도
-    if (currentUrl === URLS.main || currentUrl === `${URLS.main}/`) {
-      console.log('[LGU+] 속도측정 페이지 접근 실패, 직접 측정 서버 시도...');
-      await page.goto(URLS.speedTestDirect, { waitUntil: 'networkidle', timeout: 30_000 });
-      await page.waitForTimeout(PAGE_LOAD_WAIT);
+        await this.dismissPopups();
+
+        // 프로그램 설치 요구 팝업 감지
+        const installRequired = await page.evaluate(() => {
+          const bodyText = document.body.innerText || '';
+          return bodyText.includes('프로그램 설치') ||
+            bodyText.includes('ActiveX') ||
+            bodyText.includes('플러그인 설치');
+        });
+
+        if (installRequired) {
+          await this.saveSnapshot('install-required');
+          throw new Error(
+            'PC 프로그램 설치가 필요합니다. ' +
+            'LGU+ 속도측정은 전용 프로그램이 필요할 수 있습니다. ' +
+            '브라우저에서 직접 https://www.lguplus.com/support/self-troubleshoot/internet-speed-test 에 ' +
+            '접속하여 안내에 따라 프로그램을 설치한 뒤 다시 시도하세요.'
+          );
+        }
+
+        console.log(`[LGU+] 속도측정 페이지 도착: ${page.url()}`);
+        await this.saveSnapshot('speedtest-page');
+        return;
+      } catch (err) {
+        if (attempt === MAX_RETRIES) throw err;
+        console.log(`[LGU+] 페이지 로드 실패, 재시도... (${err instanceof Error ? err.message : err})`);
+        await page.waitForTimeout(3_000);
+      }
     }
   }
 
@@ -204,150 +336,224 @@ export class LGUplusProvider {
   private async runSLAMeasurement(): Promise<SpeedTestRound[]> {
     const page = this.getPage();
     const minSpeed = getMinGuaranteedSpeed(this.config.plan.speed_mbps);
-    const rounds: SpeedTestRound[] = [];
 
-    // SLA 측정 버튼 찾기
+    // 회선 선택 (다회선 사용자)
+    await this.selectLineIfNeeded();
+
+    // SLA 측정 버튼 탐색 및 클릭
     console.log('[LGU+] SLA 측정 버튼 탐색 중...');
-    let slaButton = await page.$(SELECTORS.speedTest.slaButton);
+    const slaButtonSelectors = [
+      'button:has-text("최저 보장 속도 측정")',
+      'button:has-text("최저보장속도 측정")',
+      'button:has-text("SLA")',
+      'a:has-text("최저 보장 속도 측정")',
+      'a:has-text("최저보장속도")',
+      'a:has-text("SLA")',
+      'button:has-text("최저보장")',
+    ];
+
+    let slaButton = await findFirstVisible(page, slaButtonSelectors, 10_000);
 
     if (!slaButton) {
-      // SLA 전용 버튼이 없으면 일반 측정 버튼 사용
-      console.log('[LGU+] SLA 전용 버튼 없음, 일반 측정으로 진행');
-      slaButton = await page.$(SELECTORS.speedTest.startButton);
+      // SLA 전용 버튼이 없으면 일반 측정 버튼 시도
+      console.log('[LGU+] SLA 전용 버튼 미발견, 일반 측정 버튼 탐색');
+      const generalButtonSelectors = [
+        'button:has-text("측정 시작")',
+        'button:has-text("속도측정")',
+        'button:has-text("속도 측정")',
+        'button:has-text("시작")',
+        'a:has-text("측정 시작")',
+      ];
+      slaButton = await findFirstVisible(page, generalButtonSelectors, 5_000);
     }
 
     if (!slaButton) {
+      await this.saveSnapshot('sla-button-not-found');
       throw new Error(
-        '속도측정 버튼을 찾을 수 없습니다.\n' +
-        '`damn-my-slow-lg calibrate` 명령으로 DOM 선택자를 확인해주세요.'
+        '속도측정 버튼을 찾을 수 없습니다. ' +
+        '`damn-my-slow-lg calibrate` 명령으로 페이지 구조를 확인해주세요.'
       );
     }
 
-    // 회선 선택이 필요한 경우
-    const lineOption = await page.$(SELECTORS.lineSelect.lineOptions);
-    if (lineOption) {
-      console.log('[LGU+] 회선 선택 중...');
-      await lineOption.click();
-      const confirmBtn = await page.$(SELECTORS.lineSelect.confirmButton);
-      if (confirmBtn) await confirmBtn.click();
-      await page.waitForTimeout(2000);
+    // 측정 시작
+    console.log('[LGU+] SLA 속도 측정 시작');
+    await slaButton.click();
+    await page.waitForTimeout(SPA_SETTLE);
+    await this.saveSnapshot('measurement-started');
+
+    // 5회 측정 완료 대기 (page.evaluate 폴링)
+    const rounds = await this.pollForResults(minSpeed);
+
+    if (rounds.length === 0) {
+      await this.saveSnapshot('measurement-timeout');
+      throw new Error(
+        '측정 결과를 파싱할 수 없습니다. ' +
+        '40분 타임아웃 또는 페이지 구조 변경.'
+      );
     }
 
-    // 측정 시작
-    console.log('[LGU+] 속도 측정 시작...');
-    await slaButton.click();
+    return rounds;
+  }
 
-    // SLA 측정 (5회) 또는 일반 측정 (1회) 완료 대기
+  /** 회선 선택 UI 처리 (다회선 사용자) */
+  private async selectLineIfNeeded(): Promise<void> {
+    const page = this.getPage();
+
+    const lineSelectors = [
+      'select:has(option)',
+      'label:has-text("회선")',
+      'button:has-text("회선")',
+      '[role="listbox"]',
+    ];
+
+    const lineUI = await findFirstVisible(page, lineSelectors, 3_000);
+    if (lineUI) {
+      console.log('[LGU+] 회선 선택 UI 감지, 첫 번째 회선 선택');
+
+      // select 요소인 경우
+      const tagName = await lineUI.evaluate((el) => el.tagName.toLowerCase());
+      if (tagName === 'select') {
+        // 첫 번째 유효 옵션 선택 (보통 현재 회선)
+        await lineUI.selectOption({ index: 0 });
+      } else {
+        await lineUI.click();
+      }
+
+      await tryClick(page, [
+        'button:has-text("확인")',
+        'button:has-text("선택")',
+        'button:has-text("적용")',
+      ]);
+      await page.waitForTimeout(2_000);
+    }
+  }
+
+  /**
+   * page.evaluate() 기반 측정 완료 폴링
+   *
+   * 15초 간격으로 DOM을 직접 검사하여 5회 라운드 결과가
+   * 모두 채워졌는지 확인한다.
+   */
+  private async pollForResults(minSpeed: number): Promise<SpeedTestRound[]> {
+    const page = this.getPage();
     const startTime = Date.now();
+    let lastRoundCount = 0;
 
     while (Date.now() - startTime < MEASURE_TIMEOUT) {
       await page.waitForTimeout(POLL_INTERVAL);
 
-      // 결과 파싱 시도
-      const parsed = await this.parseResults();
-      if (parsed.length > 0) {
-        for (const r of parsed) {
-          r.passed = judgeRound(r.download_mbps, minSpeed);
-          rounds.push(r);
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+
+      // page.evaluate로 DOM 직접 검사
+      const parsed = await page.evaluate(() => {
+        const results: Array<{ round: number; download: number; upload: number }> = [];
+        const bodyText = document.body.innerText || '';
+
+        // 패턴 1: 테이블 행에서 Mbps 값 추출
+        const rows = document.querySelectorAll('table tr, [class*="round"], [class*="step"], [class*="result-row"]');
+        let roundNum = 1;
+        for (const row of rows) {
+          const text = (row as HTMLElement).innerText || '';
+          const speeds = text.match(/(\d+\.?\d*)\s*[Mm]bps/gi);
+          if (speeds && speeds.length >= 1) {
+            const dl = parseFloat(speeds[0].replace(/[^0-9.]/g, ''));
+            const ul = speeds.length >= 2 ? parseFloat(speeds[1].replace(/[^0-9.]/g, '')) : 0;
+            if (dl > 0) {
+              results.push({ round: roundNum++, download: dl, upload: ul });
+            }
+          }
         }
-        break;
+
+        // 패턴 2: 테이블이 없으면 전체 텍스트에서 연속 Mbps 값 추출
+        if (results.length === 0) {
+          const allSpeeds = bodyText.match(/(\d+\.?\d*)\s*[Mm]bps/gi);
+          if (allSpeeds && allSpeeds.length >= 2) {
+            // 짝수개씩 download/upload 쌍으로 취급
+            for (let i = 0; i < allSpeeds.length; i += 2) {
+              const dl = parseFloat(allSpeeds[i].replace(/[^0-9.]/g, ''));
+              const ul = i + 1 < allSpeeds.length
+                ? parseFloat(allSpeeds[i + 1].replace(/[^0-9.]/g, ''))
+                : 0;
+              if (dl > 0) {
+                results.push({ round: results.length + 1, download: dl, upload: ul });
+              }
+            }
+          }
+        }
+
+        // 완료 키워드 감지
+        const isComplete = bodyText.includes('측정 완료') ||
+          bodyText.includes('결과 확인') ||
+          bodyText.includes('측정이 완료') ||
+          bodyText.includes('테스트 완료');
+
+        // SLA 판정 텍스트 감지
+        const slaText = bodyText.includes('미달') ? 'fail'
+          : bodyText.includes('충족') ? 'pass'
+          : null;
+
+        return { results, isComplete, slaText };
+      });
+
+      const roundCount = parsed.results.length;
+
+      if (roundCount > lastRoundCount) {
+        console.log(`[LGU+] 라운드 ${roundCount}/5 완료 (${elapsed}초 경과)`);
+        lastRoundCount = roundCount;
+        await this.saveSnapshot(`round-${roundCount}`);
+      } else {
+        console.log(`[LGU+] 측정 진행 중... ${roundCount}/5 (${elapsed}초 경과)`);
       }
 
-      // 진행 상태 확인
-      const isStillMeasuring = await page.$(SELECTORS.speedTest.progressIndicator);
-      if (!isStillMeasuring) {
-        // 측정이 끝났는데 결과가 없으면 단일 측정 결과 시도
-        const singleResult = await this.parseSingleResult();
-        if (singleResult) {
-          singleResult.passed = judgeRound(singleResult.download_mbps, minSpeed);
-          rounds.push(singleResult);
-          break;
-        }
+      // 5회 라운드 결과가 모두 채워졌거나 완료 키워드 감지
+      if (roundCount >= 5 || (parsed.isComplete && roundCount > 0)) {
+        console.log('[LGU+] 측정 완료 감지');
+        await this.saveSnapshot('measurement-complete');
+
+        const rounds: SpeedTestRound[] = parsed.results.map((r) => ({
+          round: r.round,
+          download_mbps: r.download,
+          upload_mbps: r.upload,
+          passed: judgeRound(r.download, minSpeed),
+        }));
+
+        return rounds;
       }
-
-      console.log(`[LGU+] 측정 진행 중... (${Math.round((Date.now() - startTime) / 1000)}초 경과)`);
     }
 
-    if (rounds.length === 0) {
-      throw new Error('측정 결과를 파싱할 수 없습니다. 타임아웃.');
-    }
-
-    return rounds;
-  }
-
-  /** SLA 5회 측정 결과 테이블 파싱 */
-  private async parseResults(): Promise<SpeedTestRound[]> {
-    const page = this.getPage();
-    const rounds: SpeedTestRound[] = [];
-
-    try {
-      // 결과 테이블/리스트에서 각 라운드 추출
-      const rows = await page.$$(SELECTORS.speedTest.roundRows);
+    // 타임아웃 - 부분 결과라도 반환
+    const finalParsed = await page.evaluate(() => {
+      const results: Array<{ round: number; download: number; upload: number }> = [];
+      const rows = document.querySelectorAll('table tr, [class*="round"], [class*="step"]');
       let roundNum = 1;
-
       for (const row of rows) {
-        const text = await row.innerText().catch(() => '');
-        // 속도값 추출 (숫자 패턴)
-        const speedMatch = text.match(/(\d+\.?\d*)\s*[Mm]bps/gi);
-        if (speedMatch && speedMatch.length >= 1) {
-          const download = parseFloat(speedMatch[0].replace(/[^0-9.]/g, ''));
-          const upload = speedMatch.length >= 2
-            ? parseFloat(speedMatch[1].replace(/[^0-9.]/g, ''))
-            : 0;
-
-          rounds.push({
-            round: roundNum++,
-            download_mbps: download,
-            upload_mbps: upload,
-            passed: false, // 호출자가 설정
-          });
+        const text = (row as HTMLElement).innerText || '';
+        const speeds = text.match(/(\d+\.?\d*)\s*[Mm]bps/gi);
+        if (speeds && speeds.length >= 1) {
+          const dl = parseFloat(speeds[0].replace(/[^0-9.]/g, ''));
+          const ul = speeds.length >= 2 ? parseFloat(speeds[1].replace(/[^0-9.]/g, '')) : 0;
+          if (dl > 0) {
+            results.push({ round: roundNum++, download: dl, upload: ul });
+          }
         }
       }
-    } catch {
-      // 파싱 실패 시 빈 배열 반환
+      return results;
+    });
+
+    if (finalParsed.length > 0) {
+      console.log(`[LGU+] 타임아웃, 부분 결과 반환 (${finalParsed.length}회)`);
+      return finalParsed.map((r) => ({
+        round: r.round,
+        download_mbps: r.download,
+        upload_mbps: r.upload,
+        passed: judgeRound(r.download, minSpeed),
+      }));
     }
 
-    return rounds;
+    return [];
   }
 
-  /** 단일 측정 결과 파싱 */
-  private async parseSingleResult(): Promise<SpeedTestRound | null> {
-    const page = this.getPage();
-
-    try {
-      const downloadEl = await page.$(SELECTORS.speedTest.downloadResult);
-      if (!downloadEl) return null;
-
-      const downloadText = await downloadEl.innerText();
-      const download = parseFloat(downloadText.replace(/[^0-9.]/g, ''));
-      if (isNaN(download)) return null;
-
-      let upload = 0;
-      const uploadEl = await page.$(SELECTORS.speedTest.uploadResult);
-      if (uploadEl) {
-        const uploadText = await uploadEl.innerText();
-        upload = parseFloat(uploadText.replace(/[^0-9.]/g, '')) || 0;
-      }
-
-      let ping = 0;
-      const pingEl = await page.$(SELECTORS.speedTest.pingResult);
-      if (pingEl) {
-        const pingText = await pingEl.innerText();
-        ping = parseFloat(pingText.replace(/[^0-9.]/g, '')) || 0;
-      }
-
-      return {
-        round: 1,
-        download_mbps: download,
-        upload_mbps: upload,
-        passed: false,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  /** HTML 스냅샷 저장 (증거 보존) */
+  /** HTML + 스크린샷 스냅샷 저장 */
   private async saveSnapshot(label: string): Promise<string> {
     const page = this.getPage();
     const snapshotDir = path.join(DATA_DIR, 'snapshots');
@@ -357,14 +563,19 @@ export class LGUplusProvider {
     }
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const htmlPath = path.join(snapshotDir, `lguplus-${label}-${timestamp}.html`);
-    const screenshotPath = path.join(snapshotDir, `lguplus-${label}-${timestamp}.png`);
+    const baseName = `lguplus-${label}-${timestamp}`;
+    const htmlPath = path.join(snapshotDir, `${baseName}.html`);
+    const screenshotPath = path.join(snapshotDir, `${baseName}.png`);
 
-    const html = await page.content();
-    fs.writeFileSync(htmlPath, html, 'utf-8');
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+    try {
+      const html = await page.content();
+      fs.writeFileSync(htmlPath, html, 'utf-8');
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      console.log(`[LGU+] 스냅샷: ${baseName}`);
+    } catch (err) {
+      console.log(`[LGU+] 스냅샷 저장 실패: ${err instanceof Error ? err.message : err}`);
+    }
 
-    console.log(`[LGU+] 스냅샷 저장: ${htmlPath}`);
     return htmlPath;
   }
 
@@ -375,20 +586,17 @@ export class LGUplusProvider {
       await this.login();
       await this.navigateToSpeedTest();
 
-      // 속도측정 전 스냅샷
       await this.saveSnapshot('before-test');
 
-      // SLA 측정 (5회)
       const rounds = await this.runSLAMeasurement();
 
-      // 결과 스냅샷
       await this.saveSnapshot('after-test');
 
       // SLA 판정
       const slaResult = judgeSLA(rounds);
       const totalDownload = rounds.reduce((sum, r) => sum + r.download_mbps, 0) / rounds.length;
       const totalUpload = rounds.reduce((sum, r) => sum + r.upload_mbps, 0) / rounds.length;
-      const failCount = rounds.filter(r => !r.passed).length;
+      const failCount = rounds.filter((r) => !r.passed).length;
 
       const result: SpeedTestResult = {
         download_mbps: totalDownload,
@@ -406,7 +614,7 @@ export class LGUplusProvider {
         error: '',
       };
 
-      // SLA 미달 시 안내 (LGU+는 전화 감면 신청)
+      // SLA 미달 안내
       if (slaResult === 'fail' && !dryRun) {
         console.log('');
         console.log('='.repeat(60));
@@ -424,7 +632,6 @@ export class LGUplusProvider {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
 
-      // 에러 시에도 스냅샷 시도
       try {
         await this.saveSnapshot('error');
       } catch {
@@ -448,12 +655,11 @@ export class LGUplusProvider {
 
   /**
    * 캘리브레이션 모드
-   * headless=false로 브라우저를 열어 사용자가 직접 DOM 구조를 확인할 수 있게 함
+   * headless=false로 브라우저를 열어 DOM 구조를 직접 확인
    */
   async calibrate(): Promise<void> {
     console.log('[LGU+] 캘리브레이션 모드 시작');
     console.log('[LGU+] headless=false로 브라우저를 엽니다.');
-    console.log('[LGU+] LGU+ 속도측정 페이지에서 DOM 구조를 확인해주세요.');
     console.log('');
 
     const origHeadless = this.config.headless;
@@ -466,16 +672,14 @@ export class LGUplusProvider {
 
       const page = this.getPage();
       console.log(`[LGU+] 현재 URL: ${page.url()}`);
-      console.log('[LGU+] 브라우저에서 DevTools(F12)를 열어 DOM을 확인하세요.');
-      console.log('[LGU+] 확인할 요소:');
-      console.log('  1. SLA 측정 버튼의 선택자');
-      console.log('  2. 측정 결과 테이블/목록의 선택자');
-      console.log('  3. 다운로드/업로드 속도값의 선택자');
+      console.log('[LGU+] DevTools(F12)를 열어 확인할 요소:');
+      console.log('  1. "최저 보장 속도 측정(SLA)" 버튼의 선택자');
+      console.log('  2. 측정 결과 테이블/행의 선택자');
+      console.log('  3. 다운로드/업로드 Mbps 값의 위치');
+      console.log('  4. 회선 선택 UI (다회선 사용자)');
       console.log('');
-      console.log('[LGU+] 스냅샷을 저장합니다...');
       await this.saveSnapshot('calibrate');
 
-      // 사용자가 브라우저를 닫을 때까지 대기
       console.log('[LGU+] 브라우저를 닫으면 캘리브레이션이 종료됩니다.');
       await page.waitForEvent('close', { timeout: 0 }).catch(() => {});
     } finally {
