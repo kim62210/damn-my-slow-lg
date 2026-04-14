@@ -14,6 +14,8 @@ LG U+ 인터넷 SLA 속도 미달 시 요금 감면을 도와주는 CLI 도구.
 2. 속도측정 페이지에서 SLA 5회 측정을 자동 실행 (page.evaluate 폴링, 15초 간격)
 3. 결과를 DB에 기록하고 Discord/Telegram으로 알림
 4. SLA 미달 시 **101(고객센터) 전화 안내** 발송
+5. 연속 에러 시 **알림 throttle** (동일 에러 3회 이상 반복 시 24시간 1회)
+6. `stop_on_complaint_success` 활성화 시 당일 감면 성공/SLA 미달 확인 후 추가 측정 스킵
 
 LGU+ 네트워크 외부에서는 **Ookla Speedtest CLI**를 fallback 측정 수단으로 사용할 수 있습니다.
 단, Ookla 측정 결과는 참고용이며 공식 SLA 감면 증빙으로는 사용할 수 없습니다.
@@ -151,7 +153,7 @@ schedule:
   timezone: "Asia/Seoul"
   max_attempts: 10
   retry_interval_minutes: 120
-  stop_on_complaint_success: true
+  stop_on_complaint_success: true  # 당일 감면 성공 또는 SLA 미달 확인 시 추가 측정 스킵
 notification:
   discord_webhook: ""
   telegram_bot_token: ""
@@ -170,7 +172,7 @@ src/
   core/
     config.ts           # 설정 관리 (YAML)
     db.ts               # SQLite/JSON 저장소
-    notify.ts           # Discord/Telegram 알림
+    notify.ts           # Discord/Telegram 알림 + 에러 throttle
     scheduler.ts        # launchd/crontab 등록
     sla.ts              # SLA 판정 로직
   providers/
