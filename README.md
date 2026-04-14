@@ -157,6 +157,8 @@ src/
     lguplus.ts          # LG U+ Playwright 자동화
     speedtest-cli.ts    # Ookla Speedtest CLI 래퍼 (fallback)
 tests/
+  db.test.ts            # DB 드라이버 테스트
+  scheduler.test.ts     # 스케줄러 테스트
   sla.test.ts           # SLA 판정 테스트
   config.test.ts        # 설정 테스트
   notify.test.ts        # 알림 테스트
