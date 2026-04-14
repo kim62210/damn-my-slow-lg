@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type { NotifyPayload, SpeedTestResult } from '../src/types';
 
 // axios mock
@@ -8,7 +11,7 @@ vi.mock('axios', () => ({
   },
 }));
 
-import { sendDiscord, sendTelegram, notify } from '../src/core/notify';
+import { sendDiscord, sendTelegram, notify, shouldThrottleNotify, needsRecoveryNotify } from '../src/core/notify';
 import axios from 'axios';
 
 const mockResult: SpeedTestResult = {
@@ -120,5 +123,115 @@ describe('notify', () => {
       mockPayload,
     );
     expect(axios.post).not.toHaveBeenCalled();
+  });
+});
+
+describe('shouldThrottleNotify', () => {
+  const STATE_FILE = path.join(os.homedir(), '.damn-my-slow-isp', 'notify-state.json');
+  let stateBackup: string | null = null;
+
+  beforeEach(() => {
+    // 기존 상태 파일 백업
+    try {
+      stateBackup = fs.readFileSync(STATE_FILE, 'utf-8');
+    } catch {
+      stateBackup = null;
+    }
+    // 테스트용 초기화
+    try { fs.unlinkSync(STATE_FILE); } catch { /* 없으면 무시 */ }
+  });
+
+  afterEach(() => {
+    // 상태 파일 복원
+    if (stateBackup !== null) {
+      fs.writeFileSync(STATE_FILE, stateBackup, 'utf-8');
+    } else {
+      try { fs.unlinkSync(STATE_FILE); } catch { /* 없으면 무시 */ }
+    }
+  });
+
+  const makeErrorResult = (error = '측정 프로그램 미설치'): SpeedTestResult => ({
+    ...mockResult,
+    sla_result: 'unknown',
+    error,
+  });
+
+  const makePassResult = (): SpeedTestResult => ({
+    ...mockResult,
+    sla_result: 'pass',
+    error: '',
+  });
+
+  it('정상 결과는 throttle하지 않는다', () => {
+    expect(shouldThrottleNotify(makePassResult())).toBe(false);
+  });
+
+  it('첫 에러는 throttle하지 않는다', () => {
+    expect(shouldThrottleNotify(makeErrorResult())).toBe(false);
+  });
+
+  it('동일 에러 2회까지는 throttle하지 않는다', () => {
+    shouldThrottleNotify(makeErrorResult());
+    expect(shouldThrottleNotify(makeErrorResult())).toBe(false);
+  });
+
+  it('동일 에러 3회째부터 throttle한다', () => {
+    shouldThrottleNotify(makeErrorResult());
+    shouldThrottleNotify(makeErrorResult());
+    shouldThrottleNotify(makeErrorResult()); // 3회째: 알림 허용 (첫 throttle 시점)
+    // 4회째: 24시간 안 지남 -> throttle
+    expect(shouldThrottleNotify(makeErrorResult())).toBe(true);
+  });
+
+  it('다른 에러가 발생하면 카운트가 리셋된다', () => {
+    shouldThrottleNotify(makeErrorResult('에러 A'));
+    shouldThrottleNotify(makeErrorResult('에러 A'));
+    shouldThrottleNotify(makeErrorResult('에러 A'));
+    // 다른 에러 -> 리셋
+    expect(shouldThrottleNotify(makeErrorResult('에러 B'))).toBe(false);
+  });
+
+  it('에러 후 정상 결과가 오면 상태가 초기화된다', () => {
+    shouldThrottleNotify(makeErrorResult());
+    shouldThrottleNotify(makeErrorResult());
+    shouldThrottleNotify(makeErrorResult());
+    // 정상 -> 초기화
+    shouldThrottleNotify(makePassResult());
+    // 다시 에러 -> 첫 에러로 취급
+    expect(shouldThrottleNotify(makeErrorResult())).toBe(false);
+  });
+});
+
+describe('needsRecoveryNotify', () => {
+  const STATE_FILE = path.join(os.homedir(), '.damn-my-slow-isp', 'notify-state.json');
+  let stateBackup: string | null = null;
+
+  beforeEach(() => {
+    try {
+      stateBackup = fs.readFileSync(STATE_FILE, 'utf-8');
+    } catch {
+      stateBackup = null;
+    }
+    try { fs.unlinkSync(STATE_FILE); } catch { /* 없으면 무시 */ }
+  });
+
+  afterEach(() => {
+    if (stateBackup !== null) {
+      fs.writeFileSync(STATE_FILE, stateBackup, 'utf-8');
+    } else {
+      try { fs.unlinkSync(STATE_FILE); } catch { /* 없으면 무시 */ }
+    }
+  });
+
+  it('연속 에러 3회 이상 후 복구 알림 필요', () => {
+    const errorResult: SpeedTestResult = { ...mockResult, sla_result: 'unknown', error: 'test error' };
+    shouldThrottleNotify(errorResult);
+    shouldThrottleNotify(errorResult);
+    shouldThrottleNotify(errorResult);
+    expect(needsRecoveryNotify()).toBe(true);
+  });
+
+  it('에러 이력 없으면 복구 알림 불필요', () => {
+    expect(needsRecoveryNotify()).toBe(false);
   });
 });

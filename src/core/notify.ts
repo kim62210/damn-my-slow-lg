@@ -3,7 +3,99 @@
  */
 
 import axios from 'axios';
-import type { Notification, NotifyPayload } from '../types';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import type { Notification, NotifyPayload, SpeedTestResult } from '../types';
+
+/** 알림 throttle 상태 */
+interface NotifyState {
+  lastError: string;
+  consecutiveErrors: number;
+  lastNotifiedAt: string;
+}
+
+const STATE_DIR = path.join(os.homedir(), '.damn-my-slow-isp');
+const STATE_FILE = path.join(STATE_DIR, 'notify-state.json');
+
+function loadNotifyState(): NotifyState | null {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) as NotifyState;
+    }
+  } catch {
+    // 파싱 실패 시 초기 상태로
+  }
+  return null;
+}
+
+function saveNotifyState(state: NotifyState): void {
+  if (!fs.existsSync(STATE_DIR)) {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+  }
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
+}
+
+/**
+ * 연속 에러 시 알림 throttle 판정.
+ * - sla_result === 'unknown' && error 있을 때만 throttle 대상
+ * - 동일 에러 3회 이상 연속이면 하루 1회만 알림
+ * - 에러 -> 성공 전환 시 false 반환 (복구 알림 발송용)
+ */
+export function shouldThrottleNotify(result: SpeedTestResult): boolean {
+  const isError = result.sla_result === 'unknown' && !!result.error;
+  const prev = loadNotifyState();
+
+  if (!isError) {
+    // 정상 결과 - throttle 안 함, 상태 초기화
+    if (prev && prev.consecutiveErrors > 0) {
+      saveNotifyState({ lastError: '', consecutiveErrors: 0, lastNotifiedAt: '' });
+    }
+    return false;
+  }
+
+  // 에러인 경우
+  const errorKey = result.error;
+  const now = new Date();
+
+  if (!prev || prev.lastError !== errorKey) {
+    // 새로운 에러 - 카운트 리셋, 알림 허용
+    saveNotifyState({ lastError: errorKey, consecutiveErrors: 1, lastNotifiedAt: now.toISOString() });
+    return false;
+  }
+
+  // 동일 에러 반복
+  const newCount = prev.consecutiveErrors + 1;
+
+  if (newCount < 3) {
+    // 3회 미만이면 알림 허용
+    saveNotifyState({ lastError: errorKey, consecutiveErrors: newCount, lastNotifiedAt: now.toISOString() });
+    return false;
+  }
+
+  // 3회 이상: 마지막 알림으로부터 24시간 경과했는지 확인
+  if (prev.lastNotifiedAt) {
+    const lastNotified = new Date(prev.lastNotifiedAt);
+    const hoursSince = (now.getTime() - lastNotified.getTime()) / (1000 * 60 * 60);
+    if (hoursSince < 24) {
+      // 24시간 안 지남 - throttle
+      saveNotifyState({ lastError: errorKey, consecutiveErrors: newCount, lastNotifiedAt: prev.lastNotifiedAt });
+      return true;
+    }
+  }
+
+  // 24시간 경과 또는 첫 알림 - 허용
+  saveNotifyState({ lastError: errorKey, consecutiveErrors: newCount, lastNotifiedAt: now.toISOString() });
+  return false;
+}
+
+/**
+ * 에러 -> 성공 전환 시 복구 알림이 필요한지 반환.
+ */
+export function needsRecoveryNotify(): boolean {
+  const prev = loadNotifyState();
+  return prev !== null && prev.consecutiveErrors >= 3;
+}
 
 const TIMEOUT_MS = 10_000;
 

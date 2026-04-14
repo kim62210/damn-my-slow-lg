@@ -150,6 +150,55 @@ describe('JsonDriver', () => {
   });
 });
 
+describe('hasComplaintSuccessToday / hasSlaFailToday', () => {
+  it('오늘 complaint_result=success 레코드가 있으면 true', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = createDB(dbPath);
+
+    db.insert(makeRecord({ tested_at: new Date().toISOString(), complaint_result: 'success' }));
+
+    expect(db.hasComplaintSuccessToday()).toBe(true);
+    expect(db.hasSlaFailToday()).toBe(false);
+    db.close();
+  });
+
+  it('오늘 sla_result=fail 레코드가 있으면 true', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = createDB(dbPath);
+
+    db.insert(makeRecord({ tested_at: new Date().toISOString(), sla_result: 'fail' }));
+
+    expect(db.hasSlaFailToday()).toBe(true);
+    expect(db.hasComplaintSuccessToday()).toBe(false);
+    db.close();
+  });
+
+  it('어제 레코드만 있으면 둘 다 false', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = createDB(dbPath);
+
+    const yesterday = new Date(Date.now() - 86400000).toISOString();
+    db.insert(makeRecord({ tested_at: yesterday, sla_result: 'fail', complaint_result: 'success' }));
+
+    expect(db.hasComplaintSuccessToday()).toBe(false);
+    expect(db.hasSlaFailToday()).toBe(false);
+    db.close();
+  });
+
+  it('레코드가 없으면 둘 다 false', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = createDB(dbPath);
+
+    expect(db.hasComplaintSuccessToday()).toBe(false);
+    expect(db.hasSlaFailToday()).toBe(false);
+    db.close();
+  });
+});
+
 describe('resultToRecord', () => {
   it('SpeedTestResult를 SpeedTestRecord로 올바르게 변환한다', () => {
     const result: SpeedTestResult = {

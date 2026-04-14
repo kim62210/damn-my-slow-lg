@@ -12,7 +12,7 @@ import path from 'path';
 import { execSync } from 'child_process';
 import { loadConfig, saveConfig, configExists, getDefaultConfig, ensureDataDir, DATA_DIR } from './core/config';
 import { createDB, resultToRecord } from './core/db';
-import { notify } from './core/notify';
+import { notify, shouldThrottleNotify, needsRecoveryNotify } from './core/notify';
 import { getMinGuaranteedSpeed } from './core/sla';
 import { installScheduler, uninstallScheduler } from './core/scheduler';
 import { LGUplusProvider } from './providers/lguplus';
@@ -156,6 +156,23 @@ program
     try {
     const config = loadConfig();
 
+    // stop_on_complaint_success: 오늘 이미 감면 성공 또는 SLA fail 기록이 있으면 스킵
+    if (config.schedule.stop_on_complaint_success && !options.history) {
+      const db = createDB(config.db_path);
+      try {
+        if (db.hasComplaintSuccessToday()) {
+          console.log(chalk.yellow('오늘 이미 감면 성공 기록이 있어 측정을 건너뜁니다.'));
+          return;
+        }
+        if (db.hasSlaFailToday()) {
+          console.log(chalk.yellow('오늘 이미 SLA 미달 확인 기록이 있어 측정을 건너뜁니다.'));
+          return;
+        }
+      } finally {
+        db.close();
+      }
+    }
+
     // --history 모드: 측정 없이 이력만 스크래핑
     if (options.history) {
       console.log(chalk.magenta.bold('\n  damn-my-slow-lg 이력 스크래핑\n'));
@@ -292,17 +309,26 @@ program
       console.log('');
     }
 
-    // 알림 발송
+    // 알림 발송 (에러 연속 시 throttle 적용)
     if (options.notify && (config.notification.discord_webhook || config.notification.telegram_bot_token)) {
-      const payload: NotifyPayload = {
-        title: `${providerName === 'ookla' ? '[Ookla] ' : ''}LG U+ 속도 측정 결과`,
-        result,
-        plan_speed: config.plan.speed_mbps,
-        min_guaranteed_speed: getMinGuaranteedSpeed(config.plan.speed_mbps),
-        timestamp: new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }),
-      };
-      await notify(config.notification, payload);
-      console.log(chalk.gray('알림 발송 완료'));
+      const recovery = needsRecoveryNotify();
+      const throttled = shouldThrottleNotify(result);
+
+      if (throttled) {
+        console.log(chalk.gray('동일 에러 반복 -- 알림 throttle (24시간 내 재알림 생략)'));
+      } else {
+        const payload: NotifyPayload = {
+          title: recovery && result.sla_result !== 'unknown'
+            ? `[복구됨] ${providerName === 'ookla' ? '[Ookla] ' : ''}LG U+ 속도 측정 결과`
+            : `${providerName === 'ookla' ? '[Ookla] ' : ''}LG U+ 속도 측정 결과`,
+          result,
+          plan_speed: config.plan.speed_mbps,
+          min_guaranteed_speed: getMinGuaranteedSpeed(config.plan.speed_mbps),
+          timestamp: new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }),
+        };
+        await notify(config.notification, payload);
+        console.log(chalk.gray('알림 발송 완료'));
+      }
     }
     } finally {
       activeProvider = null;
