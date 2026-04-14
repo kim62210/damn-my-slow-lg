@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.env
+config.yaml
+data/
+.damn-my-slow-isp/
+*.log
+.DS_Store
+coverage/
+.vscode/
+.idea/

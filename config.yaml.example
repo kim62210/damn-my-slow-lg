@@ -1,0 +1,33 @@
+# damn-my-dumb-lg 설정 파일
+# 이 파일을 config.yaml로 복사하여 사용하세요.
+
+_config_version: 1
+
+# LG U+ 로그인 정보
+credentials:
+  id: "your-lguplus-id"
+  password: "your-password"
+
+# 감면 신청 시 연락처
+phone: "010-0000-0000"
+
+# 인터넷 요금제 정보
+plan:
+  speed_mbps: 500  # 계약 속도 (Mbps)
+
+# 측정 스케줄
+schedule:
+  time: "04:00"                    # 첫 측정 시작 시각
+  timezone: "Asia/Seoul"
+  max_attempts: 10                 # 하루 최대 측정 횟수
+  retry_interval_minutes: 120      # 재시도 간격 (분)
+  stop_on_complaint_success: true  # 감면 신청 성공 시 중단
+
+# 알림 설정
+notification:
+  discord_webhook: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+
+# 브라우저 설정
+headless: true
